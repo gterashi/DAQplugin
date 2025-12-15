@@ -48,10 +48,12 @@ def read_mrc_with_meta(path: str):
                 origin = np.zeros(3, dtype=np.float32)
     return vol, vs, origin
 
+import zarr
+from numcodecs import Blosc
 
 def save_zarr_volume(vol: np.ndarray, out_dir: str, chunks=(64,64,64)):
     g = zarr.open(os.path.join(out_dir, 'map.zarr'), mode='w')
-    g.create_dataset('volume', data=vol, chunks=chunks, compressor=zarr.Blosc(cname='lz4', clevel=1, shuffle=2))
+    g.create_dataset('volume', data=vol, chunks=chunks, compressor=Blosc(cname='lz4', clevel=1, shuffle=2))
 
 
 import numpy as np
