@@ -51,10 +51,27 @@ def read_mrc_with_meta(path: str):
 import zarr
 from numcodecs import Blosc
 
-def save_zarr_volume(vol: np.ndarray, out_dir: str, chunks=(64,64,64)):
-    g = zarr.open(os.path.join(out_dir, 'map.zarr'), mode='w')
-    g.create_dataset('volume', data=vol, chunks=chunks, compressor=Blosc(cname='lz4', clevel=1, shuffle=2))
+#def save_zarr_volume(vol: np.ndarray, out_dir: str, chunks=(64,64,64)):
+#    g = zarr.open(os.path.join(out_dir, 'map.zarr'), mode='w')
+#    g.create_dataset('volume', data=vol, chunks=chunks, compressor=Blosc(cname='lz4', clevel=1, shuffle=2))
 
+def save_zarr_volume(vol: np.ndarray, out_dir: str, chunks=(64, 64, 64)):
+    os.makedirs(out_dir, exist_ok=True)
+    store_path = os.path.join(out_dir, "map.zarr")
+
+    g = zarr.open(store_path, mode="w")
+
+    compressor = Blosc(cname="lz4", clevel=1, shuffle=Blosc.SHUFFLE)  # ←数値2ではなく定数
+
+    g.create_dataset(
+        "volume",
+        data=vol,
+        chunks=chunks,
+        compressor=compressor,
+        overwrite=True
+    )
+
+    return store_path
 
 import numpy as np
 from typing import Optional
