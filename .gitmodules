@@ -1,0 +1,6 @@
+[submodule "DiffModeler"]
+	path = DiffModeler
+	url = https://github.com/kiharalab/DiffModeler
+[submodule "DAQ"]
+	path = DAQ
+	url = https://github.com/kiharalab/DAQ
