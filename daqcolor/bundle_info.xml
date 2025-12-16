@@ -1,0 +1,42 @@
+<BundleInfo name="ChimeraX-DaqColor"
+            version="0.6" package="chimerax.daq_color"
+            minSessionVersion="1" maxSessionVersion="1">
+
+  <Author>Genki Terashi</Author>
+  <Email>you@example.com</Email>
+  <URL>https://example.org/</URL>
+
+  <Synopsis>Color residues from DAQ AA/ATOM/SS probability map</Synopsis>
+  <Description>
+    Provide:
+    "daqcolor apply" — color residues from a numpy (N×32) file
+    "daqcolor monitor" — live recoloring when coordinates change (per frame)
+    "daqcolor points" - Show Points from NPY file
+  </Description>
+  <Commands>
+    <Command name="daqcolor apply"/>
+    <Command name="daqcolor monitor"/>
+    <Command name="daqcolor points"/> 
+    <Command name="daqcolor clear"/>
+  </Commands>
+  <Categories>
+    <Category name="General"/>
+  </Categories>
+
+  <Dependencies>
+    <Dependency name="ChimeraX-Core" version="~=1.1"/>
+  </Dependencies>
+
+  <Classifiers>
+    <PythonClassifier>Development Status :: 3 - Alpha</PythonClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: daqcolor apply :: General ::
+      Color residues from a numpy (N×32) probability file</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: daqcolor monitor :: General ::
+      Start/stop live recoloring (new frame trigger)</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: daqcolor points :: General ::
+      Show Points</ChimeraXClassifier>    
+    <ChimeraXClassifier>ChimeraX :: Command :: daqcolor clear :: General ::
+      Close marker models created by 'daqcolor points'</ChimeraXClassifier>
+  </Classifiers>
+
+</BundleInfo>
