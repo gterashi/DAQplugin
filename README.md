@@ -134,7 +134,7 @@ daqcolor apply npyPath model [halfwindow k] [colormap] [metric] [atomName] [clam
 daqcolor apply ./points_AA_ATOM_SS_swap.npy #2 metric aa_score 
 
 # Color by atom (CA) DAQ score
-daqcolor apply ./points_AA_ATOM_SS_swap.npy #1 metric atom_score k 1
+daqcolor apply ./points_AA_ATOM_SS_swap.npy #1 metric atom_score
 ```
 
 ---
@@ -142,13 +142,13 @@ daqcolor apply ./points_AA_ATOM_SS_swap.npy #1 metric atom_score k 1
 #### Live recoloring
 
 ```
-daqcolor monitor model [npyPath] [k] [colormap] [metric] [atomName] [on true|false]
+daqcolor monitor [npyPath] [model] [metric] [atomName] [on true|false]
 ```
 
 **Example**
 
 ```bash
-daqcolor monitor #2 ./points_AA_ATOM_SS_swap.npy metric aa_score on true
+daqcolor monitor ./points_AA_ATOM_SS_swap.npy #2 metric aa_score on true
 ```
 
 Stop monitoring:
