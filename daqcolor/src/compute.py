@@ -386,7 +386,6 @@ def compute_daq_scores(
     output_path: Optional[Union[str, Path]] = None,
     contour: float = 0.0,
     stride: int = 2,
-    device: str = "auto",
     batch_size: int = 512,
     max_points: int = 500000,
     model_path: Optional[str] = None,
@@ -407,8 +406,6 @@ def compute_daq_scores(
         Contour threshold (default: 0.0)
     stride : int
         Stride for point sampling (default: 2)
-    device : str
-        Device for inference: "auto", "cpu", or "cuda"
     batch_size : int
         Batch size for inference (default: 512)
     max_points : int
@@ -461,20 +458,9 @@ def compute_daq_scores(
     
     # Step 5: Run ONNX inference
     update_progress(4, 6, "Loading model and running inference...")
-    model = load_model(model_path, device=device)
+    model = load_model(model_path)
     
-    # Display device info
-    device_emoji = "🚀" if model.device == "cuda" else "💻"
-    session.logger.info(
-        f"{device_emoji} Using device: {model.device.upper()} "
-        f"(Provider: {model.session.get_providers()[0]})"
-    )
-    if model.device == "cpu" and device == "auto":
-        session.logger.info(
-            "💡 Tip: For faster inference, enable GPU support with:\n"
-            "    pip install onnxruntime-gpu\n"
-            "    Then use: device cuda"
-        )
+    session.logger.info(f"Running inference on {n_points} patches...")
     
     def inference_progress(current, total):
         update_progress(4, 6, f"Inference: {current}/{total} patches")

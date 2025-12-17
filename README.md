@@ -334,7 +334,25 @@ daqscore run #1 #2 device cuda metric atom_score k 1 half_window 9
 
 The plugin supports GPU acceleration through ONNX Runtime. By default, it uses CPU inference.
 
-#### Enable GPU Support
+#### Quick Setup (Recommended)
+
+Use the provided setup script to check and configure GPU support:
+
+```bash
+# Check current GPU setup status
+python scripts/setup_gpu.py --check-only
+
+# Install and configure GPU support
+python scripts/setup_gpu.py
+```
+
+The script will:
+- Check for NVIDIA GPU availability
+- Verify CUDA installation
+- Install `onnxruntime-gpu` if needed
+- Verify the installation
+
+#### Manual Setup
 
 **1. Check current status:**
 ```bash
@@ -375,15 +393,83 @@ Or use `device auto` to automatically select GPU if available, otherwise CPU.
 #### Requirements for GPU Support
 
 - NVIDIA GPU with CUDA support
-- CUDA Toolkit 11.x or 12.x installed
+- CUDA Toolkit 12.x (required for ONNX Runtime GPU with cuDNN 9)
+- cuDNN 9.* library installed and in library path
 - `onnxruntime-gpu` instead of `onnxruntime`
+
+**Note:** ONNX Runtime GPU requires specific CUDA/cuDNN versions. Check compatibility at: https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements
 
 #### Troubleshooting
 
-If GPU is not detected:
-1. Check CUDA installation: `nvidia-smi`
-2. Verify CUDA version compatibility with onnxruntime-gpu
-3. Try reinstalling: `pip install --force-reinstall onnxruntime-gpu`
+**If GPU is not detected:**
+
+**First, try the setup script for automated diagnosis:**
+```bash
+python scripts/setup_gpu.py --check-only
+```
+
+This will help identify what's missing or misconfigured.
+
+**Manual troubleshooting steps:**
+
+1. **Check CUDA installation:**
+   ```bash
+   nvidia-smi
+   ```
+   This should show your GPU and CUDA version.
+
+2. **Check for cuDNN library:**
+   ```bash
+   # Check if cuDNN is installed
+   find /usr/local/cuda* -name "libcudnn.so*" 2>/dev/null
+   # Or check common locations
+   ldconfig -p | grep cudnn
+   ```
+
+3. **Common Error: Missing cuDNN (`libcudnn.so.9: cannot open shared object file`)**
+   
+   This error indicates cuDNN is not installed or not in the library path:
+   
+   **Solution:**
+   - Install cuDNN 9.* for CUDA 12.x from NVIDIA's website
+   - Ensure cuDNN libraries are in your `LD_LIBRARY_PATH`:
+     ```bash
+     export LD_LIBRARY_PATH=/usr/local/cuda-12.x/lib64:$LD_LIBRARY_PATH
+     ```
+   - Or create a symlink if cuDNN is installed elsewhere:
+     ```bash
+     # Find cuDNN installation
+     find /usr -name "libcudnn.so.9*" 2>/dev/null
+     # Create symlink in CUDA lib directory
+     sudo ln -s /path/to/libcudnn.so.9 /usr/local/cuda-12.x/lib64/
+     ```
+
+4. **Warning: GPU device discovery failed**
+   
+   If you see: `GPU device discovery failed: Failed to open file: "/sys/class/drm/card0/device/vendor"`
+   
+   This is often a harmless warning and may not prevent GPU usage. However, if GPU still doesn't work:
+   - Verify you have proper permissions to access GPU devices
+   - Check if you're in a container/remote environment that needs GPU passthrough
+   - Try running with `device auto` - it may still detect GPU through other means
+
+5. **Verify CUDA/cuDNN version compatibility:**
+   - ONNX Runtime GPU requires specific CUDA/cuDNN combinations
+   - Check your ONNX Runtime version: `python -c "import onnxruntime; print(onnxruntime.__version__)"`
+   - See compatibility matrix: https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements
+
+6. **Try reinstalling:**
+   ```bash
+   pip uninstall onnxruntime-gpu
+   pip install onnxruntime-gpu
+   ```
+
+7. **Fallback to CPU:**
+   If GPU setup is problematic, you can always use CPU inference:
+   ```bash
+   daqscore compute #1 device cpu
+   ```
+   CPU is slower but reliable and doesn't require GPU setup.
 
 ---
 

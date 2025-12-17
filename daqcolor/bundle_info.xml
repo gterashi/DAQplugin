@@ -4,7 +4,7 @@
 
   <Author>Genki Terashi</Author>
   <Email>you@example.com</Email>
-  <URL>https://example.org/</URL>
+  <URL>https://github.com/gterashi/DAQplugin</URL>
 
   <Synopsis>DAQ Score computation and visualization for cryo-EM models</Synopsis>
   <Description>
@@ -25,12 +25,6 @@
     <Dependency name="onnxruntime" version=">=1.16.0"/>
     <Dependency name="mrcfile" version=">=1.4.0"/>
   </Dependencies>
-  
-  <!-- Optional GPU Support: For GPU acceleration, replace onnxruntime with:
-       pip uninstall onnxruntime
-       pip install onnxruntime-gpu
-       The plugin will automatically detect and use GPU when available.
-  -->
 
   <Classifiers>
     <PythonClassifier>Development Status :: 4 - Beta</PythonClassifier>
@@ -47,8 +41,6 @@
       Compute DAQ scores from a cryo-EM map</ChimeraXClassifier>
     <ChimeraXClassifier>ChimeraX :: Command :: daqscore run :: Volume Data ::
       Compute and apply DAQ scores</ChimeraXClassifier>
-    <ChimeraXClassifier>ChimeraX :: Command :: daqscore info :: General ::
-      Show DAQ device information</ChimeraXClassifier>
   </Classifiers>
 
 </BundleInfo>

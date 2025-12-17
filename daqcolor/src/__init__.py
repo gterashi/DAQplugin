@@ -29,8 +29,6 @@ class _API(BundleAPI):
             func, desc = cmd.daqscore_compute, cmd.daqscore_compute_desc
         elif ci.name == "daqscore run":
             func, desc = cmd.daqscore_run, cmd.daqscore_run_desc
-        elif ci.name == "daqscore info":
-            func, desc = cmd.daqscore_info, cmd.daqscore_info_desc
         
         else:
             raise ValueError(f"Unknown command: {ci.name}")

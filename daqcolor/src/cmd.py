@@ -243,26 +243,37 @@ def _recolor(session, model, npy_path, k, cmap, metric, atom_name, clamp_min, cl
         x = np.clip(scal, float(clamp_min), float(clamp_max))
 
     # 残基ごとの RGBA
-    res_rgba_f = cmap.interpolated_rgba(x)
+    # Handle NaN values in scores before color interpolation
+    x_safe = np.where(np.isfinite(x), x, 0.0)
+    res_rgba_f = cmap.interpolated_rgba(x_safe)
+    
+    # Mark residues without neighbors as green
+    green = np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float32)
     if not np.all(has_nbr):
-        green = np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float32)
         res_rgba_f[~has_nbr] = green
+    # Also mark NaN scores as green
+    nan_mask = ~np.isfinite(x)
+    if np.any(nan_mask):
+        res_rgba_f[nan_mask] = green
 
-    res_rgba = (np.clip(res_rgba_f,0,1)*255).astype(np.uint8)
+    res_rgba = (np.clip(res_rgba_f, 0, 1) * 255).astype(np.uint8)
     residues.ribbon_colors = res_rgba
 
     # 原子ごとの RGBA（残基→原子に展開）
     ats = residues.atoms
-    vals_atom = np.repeat(x, residues.num_atoms)     # 
+    vals_atom = np.repeat(x_safe, residues.num_atoms)
     atom_rgba_f = cmap.interpolated_rgba(vals_atom)
 
     if not np.all(has_nbr):
-        atom_mask = np.repeat(~has_nbr, residues.num_atoms)  # 
+        atom_mask = np.repeat(~has_nbr, residues.num_atoms)
         atom_rgba_f[atom_mask] = green
-
+    # Also mark NaN scores as green for atoms
+    if np.any(nan_mask):
+        atom_nan_mask = np.repeat(nan_mask, residues.num_atoms)
+        atom_rgba_f[atom_nan_mask] = green
 
     atom_rgba = np.ascontiguousarray(
-        (np.clip(atom_rgba_f,0.0,1.0)*255).astype(np.uint8)
+        (np.clip(atom_rgba_f, 0.0, 1.0) * 255).astype(np.uint8)
     )
     ats.colors = atom_rgba
 
@@ -417,12 +428,12 @@ daqcolor_clear_desc = CmdDesc(
 # DAQ Score Computation Commands
 # ===========================================================================
 
-from chimerax.core.commands import OpenFileNameArg, SaveFileNameArg, EnumOf, Or
+from chimerax.core.commands import OpenFileNameArg, SaveFileNameArg, Or
 from chimerax.map import MapArg
 
 
-def daqscore_compute(session, map_input, *, output=None, contour=0.0, stride=2,
-                     device="auto", batch_size=512, max_points=500000, model=None,
+def daqscore_compute(session, map_input, contour, *, output=None, stride=2,
+                     batch_size=512, max_points=500000, model=None,
                      monitor=None, metric="aa_score", half_window=9):
     """
     Compute DAQ scores from a cryo-EM map.
@@ -432,14 +443,12 @@ def daqscore_compute(session, map_input, *, output=None, contour=0.0, stride=2,
     session : ChimeraX session
     map_input : str or Volume
         Path to input MRC/MAP file OR a ChimeraX Volume model (e.g., #1)
+    contour : float
+        Contour threshold for density map
     output : str, optional
         Path to save output NPY file (auto-generated if not specified)
-    contour : float
-        Contour threshold (default: 0.0)
     stride : int
         Stride for point sampling (default: 2)
-    device : str
-        Device for inference: "auto", "cpu", or "cuda"
     batch_size : int
         Batch size for inference (default: 512)
     max_points : int
@@ -462,9 +471,7 @@ def daqscore_compute(session, map_input, *, output=None, contour=0.0, stride=2,
     except ImportError:
         session.logger.error(
             "onnxruntime is not installed. Please install it with:\n"
-            "  pip install onnxruntime\n"
-            "For GPU support, install:\n"
-            "  pip install onnxruntime-gpu"
+            "  pip install onnxruntime"
         )
         return
     
@@ -495,7 +502,7 @@ def daqscore_compute(session, map_input, *, output=None, contour=0.0, stride=2,
         map_source = map_path  # Pass path
     
     session.logger.info(f"  Output: {output}")
-    session.logger.info(f"  Contour: {contour}, Stride: {stride}, Device: {device}")
+    session.logger.info(f"  Contour: {contour}, Stride: {stride}")
     
     try:
         points, scores = compute_daq_scores(
@@ -504,7 +511,6 @@ def daqscore_compute(session, map_input, *, output=None, contour=0.0, stride=2,
             output_path=output,
             contour=contour,
             stride=stride,
-            device=device,
             batch_size=batch_size,
             max_points=max_points,
             model_path=model,
@@ -532,12 +538,10 @@ def daqscore_compute(session, map_input, *, output=None, contour=0.0, stride=2,
 
 
 daqscore_compute_desc = CmdDesc(
-    required=[("map_input", Or(MapArg, OpenFileNameArg))],
+    required=[("map_input", Or(MapArg, OpenFileNameArg)), ("contour", FloatArg)],
     keyword=[
         ("output", SaveFileNameArg),
-        ("contour", FloatArg),
         ("stride", IntArg),
-        ("device", EnumOf(["auto", "cpu", "cuda"])),
         ("batch_size", IntArg),
         ("max_points", IntArg),
         ("model", OpenFileNameArg),
@@ -549,8 +553,8 @@ daqscore_compute_desc = CmdDesc(
 )
 
 
-def daqscore_run(session, map_input, structure, *, output=None, contour=0.0, stride=2,
-                 device="auto", batch_size=512, max_points=500000, model=None,
+def daqscore_run(session, map_input, contour, structure, *, output=None, stride=2,
+                 batch_size=512, max_points=500000, model=None,
                  metric="aa_score", k=1, colormap=None, half_window=9):
     """
     Compute DAQ scores and apply coloring to a structure in one step.
@@ -560,16 +564,14 @@ def daqscore_run(session, map_input, structure, *, output=None, contour=0.0, str
     session : ChimeraX session
     map_input : str or Volume
         Path to input MRC/MAP file OR a ChimeraX Volume model (e.g., #1)
+    contour : float
+        Contour threshold for density map
     structure : Model
         Structure model to color
     output : str, optional
         Path to save output NPY file
-    contour : float
-        Contour threshold (default: 0.0)
     stride : int
         Stride for point sampling (default: 2)
-    device : str
-        Device for inference: "auto", "cpu", or "cuda"
     batch_size : int
         Batch size for inference (default: 512)
     max_points : int
@@ -594,9 +596,7 @@ def daqscore_run(session, map_input, structure, *, output=None, contour=0.0, str
     except ImportError:
         session.logger.error(
             "onnxruntime is not installed. Please install it with:\n"
-            "  pip install onnxruntime\n"
-            "For GPU support, install:\n"
-            "  pip install onnxruntime-gpu"
+            "  pip install onnxruntime"
         )
         return
     
@@ -631,7 +631,6 @@ def daqscore_run(session, map_input, structure, *, output=None, contour=0.0, str
             output_path=output,
             contour=contour,
             stride=stride,
-            device=device,
             batch_size=batch_size,
             max_points=max_points,
             model_path=model,
@@ -652,12 +651,10 @@ def daqscore_run(session, map_input, structure, *, output=None, contour=0.0, str
 
 
 daqscore_run_desc = CmdDesc(
-    required=[("map_input", Or(MapArg, OpenFileNameArg)), ("structure", ModelArg)],
+    required=[("map_input", Or(MapArg, OpenFileNameArg)), ("contour", FloatArg), ("structure", ModelArg)],
     keyword=[
         ("output", SaveFileNameArg),
-        ("contour", FloatArg),
         ("stride", IntArg),
-        ("device", EnumOf(["auto", "cpu", "cuda"])),
         ("batch_size", IntArg),
         ("max_points", IntArg),
         ("model", OpenFileNameArg),
@@ -667,119 +664,5 @@ daqscore_run_desc = CmdDesc(
         ("half_window", IntArg),
     ],
     synopsis="Compute DAQ scores and apply coloring to a structure (accepts file path or volume #id)"
-)
-
-
-def daqscore_info(session):
-    """
-    Show DAQ score GPU availability and device information.
-    """
-    session.logger.info("=" * 70)
-    session.logger.info("DAQ Score Device Information")
-    session.logger.info("=" * 70)
-    
-    # Check onnxruntime installation
-    try:
-        import onnxruntime as ort
-        session.logger.info(f"\n📦 ONNX Runtime")
-        session.logger.info(f"   Version: {ort.__version__}")
-        
-        # Get available providers
-        available = ort.get_available_providers()
-        session.logger.info(f"\n🔧 Available execution providers:")
-        for provider in available:
-            icon = "✅" if provider != "CPUExecutionProvider" else "💻"
-            session.logger.info(f"   {icon} {provider}")
-        
-        # GPU availability
-        cuda_available = "CUDAExecutionProvider" in available
-        session.logger.info(f"\n🎮 GPU Support")
-        if cuda_available:
-            session.logger.info("   Status: ✅ Available")
-            session.logger.info("   Usage: Add 'device cuda' to commands")
-            session.logger.info("   Example: daqscore compute #1 device cuda")
-            
-            # Try to get GPU info
-            try:
-                import subprocess
-                result = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total', 
-                                       '--format=csv,noheader'], 
-                                      capture_output=True, text=True, timeout=2)
-                if result.returncode == 0:
-                    gpu_info = result.stdout.strip().split('\n')[0]
-                    session.logger.info(f"   GPU: {gpu_info}")
-            except:
-                pass  # nvidia-smi not available or failed
-                
-        else:
-            session.logger.info("   Status: ❌ Not available (CPU only)")
-            session.logger.info("")
-            session.logger.info("   To enable GPU acceleration:")
-            session.logger.info("   1. Ensure NVIDIA GPU with CUDA is installed")
-            session.logger.info("      Check with: nvidia-smi")
-            session.logger.info("   2. Uninstall CPU-only version:")
-            session.logger.info("      pip uninstall onnxruntime")
-            session.logger.info("   3. Install GPU-enabled version:")
-            session.logger.info("      pip install onnxruntime-gpu")
-            session.logger.info("   4. Verify installation:")
-            session.logger.info("      daqscore info")
-        
-        # Performance expectations
-        session.logger.info(f"\n⚡ Performance Expectations")
-        if cuda_available:
-            session.logger.info("   GPU: ~1-5 seconds per 100K points")
-            session.logger.info("   CPU: ~10-30 seconds per 100K points")
-            session.logger.info("   Speedup: 5-20x faster with GPU")
-        else:
-            session.logger.info("   CPU: ~10-30 seconds per 100K points")
-            session.logger.info("   (GPU would be 5-20x faster)")
-        
-        # Recommended device
-        recommended = "cuda" if cuda_available else "cpu"
-        session.logger.info(f"\n💡 Recommended device: {recommended}")
-        
-    except ImportError:
-        session.logger.error("\n❌ ONNX Runtime is not installed!")
-        session.logger.error("")
-        session.logger.error("Install options:")
-        session.logger.error("  CPU only:  pip install onnxruntime")
-        session.logger.error("  GPU support: pip install onnxruntime-gpu")
-    
-    # Check for ONNX model
-    from .onnx_model import get_model_path
-    from pathlib import Path
-    
-    session.logger.info(f"\n🤖 DAQ ONNX Model")
-    model_path = get_model_path()
-    if model_path.exists():
-        size_mb = model_path.stat().st_size / 1024 / 1024
-        session.logger.info(f"   Status: ✅ Found")
-        session.logger.info(f"   Location: {model_path}")
-        session.logger.info(f"   Size: {size_mb:.2f} MB")
-    else:
-        session.logger.warning(f"   Status: ❌ NOT found!")
-        session.logger.warning("")
-        session.logger.warning("   The daqscore compute/run commands require the ONNX model.")
-        session.logger.warning("")
-        session.logger.warning("   Installation options:")
-        session.logger.warning("   1. Copy Multimodel.onnx to plugin data directory:")
-        session.logger.warning(f"      {model_path}")
-        session.logger.warning("")
-        session.logger.warning("   2. Or copy to user directory:")
-        home_path = Path.home() / ".chimerax" / "daq_model" / "Multimodel.onnx"
-        session.logger.warning(f"      {home_path}")
-        session.logger.warning("")
-        session.logger.warning("   3. Or set environment variable:")
-        session.logger.warning("      export DAQ_MODEL_PATH=/path/to/Multimodel.onnx")
-        session.logger.warning("")
-        session.logger.warning("   Generate the model using:")
-        session.logger.warning("      python scripts/export_onnx.py")
-    
-    session.logger.info("\n" + "=" * 70)
-
-
-daqscore_info_desc = CmdDesc(
-    required=[],
-    synopsis="Show DAQ score GPU availability and device information"
 )
 
