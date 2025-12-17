@@ -165,7 +165,8 @@ daqcolor monitor #2 on false
   <img src="img/example2.png" width="400">
 
 - **Aligned model using the `FitMap` command in ChimeraX**
- Blue indicates positive DAQ scores. 
+ Blue indicates positive DAQ scores.
+ 
   <img src="img/example1.png" width="400">
 
 - **PDB 7JSN (version 1)**  
