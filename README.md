@@ -4,7 +4,7 @@ DAQplugin is a collection of tools for computing, visualizing, and exporting **D
 
 This repository provides:
 
-- Google Colab ready Jupyter notebooks for DAQ score computation and NPY file generation  
+- Google Colab ready Jupyter notebooks for DAQ score computation and NPY file generation [DAQ_Score_Grid.ipynb](https://colab.research.google.com/github/gterashi/DAQplugin/blob/main/DAQ_Score_Grid.ipynb) 
 - A ChimeraX plugin (`daqcolor`) for interactive coloring and visualization  
 - Command-line utilities for processing and file export  
 
@@ -56,7 +56,7 @@ git submodule update --init --recursive
 
 ### Notebook
 
-- `DAQ_Score_Grid.ipynb`
+- [`DAQ_Score_Grid.ipynb`](https://colab.research.google.com/github/gterashi/DAQplugin/blob/main/DAQ_Score_Grid.ipynb)
 
 ### Purpose
 
@@ -72,6 +72,7 @@ The generated `.npy` files are used by the ChimeraX plugin (`daqcolor`) for visu
 1. Provide:
    - Atomic model (`.pdb` or `.cif`)
    - Cryo-EM map (`.mrc` or `.map`)
+   - 
 2. Run the notebook cells sequentially
 3. Output:
    - `points_AA_ATOM_SS_swap.npy`
@@ -155,6 +156,23 @@ Stop monitoring:
 ```bash
 daqcolor monitor #2 on false
 ```
+### Example: EMD-22456 and mis-aligned model
+
+- **Mis-aligned model**  
+  Red indicates negative DAQ scores.  
+  Green regions are located outside the contour level.
+
+  <img src="img/example2.png" width="400">
+
+- **Aligned model using the `FitMap` command in ChimeraX**
+ Blue indicates positive DAQ scores. 
+  <img src="img/example1.png" width="400">
+
+- **PDB 7JSN (version 1)**  
+  DAQ detects modeling errors in this version 1.1 deposited model.  
+  [RCSB PDB entry](https://www.rcsb.org/versions/7JSN)
+
+  <img src="img/example3.png" width="400">
 
 ---
 
