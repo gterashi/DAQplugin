@@ -1,5 +1,11 @@
 # vim: set expandtab shiftwidth=4 softtabstop=4:
+"""
+ChimeraX DAQ Score Plugin
+
+Provides DAQ score computation and visualization for cryo-EM models.
+"""
 from chimerax.core.toolshed import BundleAPI
+
 
 class _API(BundleAPI):
     api_version = 1
@@ -7,6 +13,8 @@ class _API(BundleAPI):
     @staticmethod
     def register_command(bi, ci, logger):
         from . import cmd
+        
+        # Visualization commands (daqcolor)
         if ci.name == "daqcolor apply":
             func, desc = cmd.daqcolor_apply, cmd.daqcolor_apply_desc
         elif ci.name == "daqcolor monitor":
@@ -15,6 +23,15 @@ class _API(BundleAPI):
             func, desc = cmd.daqcolor_points, cmd.daqcolor_points_desc
         elif ci.name == "daqcolor clear":
             func, desc = cmd.daqcolor_clear, cmd.daqcolor_clear_desc
+        
+        # Computation commands (daqscore)
+        elif ci.name == "daqscore compute":
+            func, desc = cmd.daqscore_compute, cmd.daqscore_compute_desc
+        elif ci.name == "daqscore run":
+            func, desc = cmd.daqscore_run, cmd.daqscore_run_desc
+        elif ci.name == "daqscore info":
+            func, desc = cmd.daqscore_info, cmd.daqscore_info_desc
+        
         else:
             raise ValueError(f"Unknown command: {ci.name}")
 
@@ -23,5 +40,6 @@ class _API(BundleAPI):
 
         from chimerax.core.commands import register
         register(ci.name, desc, func, logger=logger)
+
 
 bundle_api = _API()
