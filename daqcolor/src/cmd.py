@@ -311,6 +311,14 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
 
         def _tick(trigger_name, change_info):
             try:
+                # Check if model is still valid (not deleted)
+                if model.deleted:
+                    # Model was deleted, remove the handler
+                    info = _MON.pop(key, None)
+                    if info and "handler" in info:
+                        session.triggers.remove_handler(info["handler"])
+                    session.logger.info("daqcolor monitor stopped (model deleted)")
+                    return
                 _recolor(session, model, npy_path, k, colormap, metric, atom_name, None, None, halfwindow=half_window)
             except Exception as e:
                 session.logger.warning(f"daqcolor monitor error: {e}")
