@@ -26,6 +26,10 @@
     <Dependency name="mrcfile" version=">=1.4.0"/>
   </Dependencies>
 
+  <DataFiles package="chimerax.daqcolor">
+    <DataFile>data/Multimodel.onnx</DataFile>
+  </DataFiles>
+
   <Classifiers>
     <PythonClassifier>Development Status :: 4 - Beta</PythonClassifier>
     

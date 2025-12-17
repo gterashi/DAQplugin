@@ -147,46 +147,46 @@ def get_model_path() -> Path:
     Get the path to the ONNX model, checking multiple locations.
     
     Search order:
-    1. Plugin data/ directory (bundled with plugin)
-    2. User's home directory ~/.chimerax/daq_model/Multimodel.onnx
-    3. Environment variable DAQ_MODEL_PATH
+    1. Environment variable DAQ_MODEL_PATH
+    2. Plugin data/ directory (installed package layout)
+    3. Plugin data/ directory (development layout)
+    4. User's home directory ~/.chimerax/daq_model/Multimodel.onnx
     
     Returns
     -------
     Path
         Path to Multimodel.onnx
-        
-    Raises
-    ------
-    FileNotFoundError
-        If the model cannot be found in any location
     """
     import os
     
     # Possible model locations
     candidates = []
     
-    # 1. Plugin data/ directory
-    module_dir = Path(__file__).parent.parent
-    candidates.append(module_dir / "data" / "Multimodel.onnx")
-    
-    # 2. User's ChimeraX config directory
-    home = Path.home()
-    candidates.append(home / ".chimerax" / "daq_model" / "Multimodel.onnx")
-    
-    # 3. Environment variable
+    # 1. Environment variable (highest priority)
     env_path = os.environ.get("DAQ_MODEL_PATH")
     if env_path:
-        candidates.insert(0, Path(env_path))
+        candidates.append(Path(env_path))
+    
+    # 2. Installed package layout: data/ is sibling to module
+    # When installed: chimerax/daqcolor/onnx_model.py -> chimerax/daqcolor/data/
+    module_dir = Path(__file__).parent
+    candidates.append(module_dir / "data" / "Multimodel.onnx")
+    
+    # 3. Development layout: src/ and data/ are siblings under daqcolor/
+    # In dev: daqcolor/src/onnx_model.py -> daqcolor/data/
+    candidates.append(module_dir.parent / "data" / "Multimodel.onnx")
+    
+    # 4. User's ChimeraX config directory
+    home = Path.home()
+    candidates.append(home / ".chimerax" / "daq_model" / "Multimodel.onnx")
     
     # Return first existing path
     for path in candidates:
         if path.exists():
             return path
     
-    # Return the default path even if it doesn't exist
-    # (caller will handle the error with a helpful message)
-    return candidates[0]
+    # Return the installed path for error message (most likely location)
+    return module_dir / "data" / "Multimodel.onnx"
 
 
 def load_model(model_path: Optional[str] = None, verbose: bool = False) -> DAQOnnxModel:
