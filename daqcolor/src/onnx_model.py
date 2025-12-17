@@ -9,6 +9,56 @@ import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional
 
+# URL to download the model file
+MODEL_URL = "https://huggingface.co/zhtronics/DAQscore/resolve/main/Multimodel.onnx"
+MODEL_FILENAME = "Multimodel.onnx"
+
+
+def download_model(dest_path: Path, url: str = MODEL_URL) -> bool:
+    """
+    Download the ONNX model file.
+    
+    Parameters
+    ----------
+    dest_path : Path
+        Destination path for the model file
+    url : str
+        URL to download from
+        
+    Returns
+    -------
+    bool
+        True if download successful, False otherwise
+    """
+    import urllib.request
+    import sys
+    
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Downloading DAQ model from {url}...")
+    print(f"Destination: {dest_path}")
+    
+    try:
+        # Download with progress
+        def report_progress(block_num, block_size, total_size):
+            downloaded = block_num * block_size
+            if total_size > 0:
+                percent = min(100, downloaded * 100 / total_size)
+                mb_downloaded = downloaded / (1024 * 1024)
+                mb_total = total_size / (1024 * 1024)
+                sys.stdout.write(f"\rProgress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)")
+                sys.stdout.flush()
+        
+        urllib.request.urlretrieve(url, str(dest_path), reporthook=report_progress)
+        print("\nDownload complete!")
+        return True
+        
+    except Exception as e:
+        print(f"\nDownload failed: {e}")
+        if dest_path.exists():
+            dest_path.unlink()  # Remove partial download
+        return False
+
 
 def softmax(x: np.ndarray, axis: int = 1) -> np.ndarray:
     """Compute softmax along specified axis."""
@@ -142,15 +192,21 @@ class DAQOnnxModel:
         )
 
 
-def get_model_path() -> Path:
+def get_model_path(auto_download: bool = True) -> Path:
     """
     Get the path to the ONNX model, checking multiple locations.
+    If not found and auto_download is True, downloads to user directory.
     
     Search order:
     1. Environment variable DAQ_MODEL_PATH
     2. Plugin data/ directory (installed package layout)
     3. Plugin data/ directory (development layout)
     4. User's home directory ~/.chimerax/daq_model/Multimodel.onnx
+    
+    Parameters
+    ----------
+    auto_download : bool
+        If True, automatically download the model if not found
     
     Returns
     -------
@@ -170,33 +226,43 @@ def get_model_path() -> Path:
     # 2. Installed package layout: data/ is sibling to module
     # When installed: chimerax/daqcolor/onnx_model.py -> chimerax/daqcolor/data/
     module_dir = Path(__file__).parent
-    candidates.append(module_dir / "data" / "Multimodel.onnx")
+    candidates.append(module_dir / "data" / MODEL_FILENAME)
     
     # 3. Development layout: src/ and data/ are siblings under daqcolor/
     # In dev: daqcolor/src/onnx_model.py -> daqcolor/data/
-    candidates.append(module_dir.parent / "data" / "Multimodel.onnx")
+    candidates.append(module_dir.parent / "data" / MODEL_FILENAME)
     
-    # 4. User's ChimeraX config directory
+    # 4. User's ChimeraX config directory (also download destination)
     home = Path.home()
-    candidates.append(home / ".chimerax" / "daq_model" / "Multimodel.onnx")
+    user_model_path = home / ".chimerax" / "daq_model" / MODEL_FILENAME
+    candidates.append(user_model_path)
     
     # Return first existing path
     for path in candidates:
         if path.exists():
             return path
     
-    # Return the installed path for error message (most likely location)
-    return module_dir / "data" / "Multimodel.onnx"
+    # Model not found - try to download if enabled
+    if auto_download:
+        print(f"DAQ model not found in any of the expected locations.")
+        print(f"Attempting to download...")
+        if download_model(user_model_path):
+            return user_model_path
+    
+    # Return the user path for error message
+    return user_model_path
 
 
 def load_model(model_path: Optional[str] = None, verbose: bool = False) -> DAQOnnxModel:
     """
     Load the DAQ ONNX model.
     
+    If model is not found, attempts to download it automatically.
+    
     Parameters
     ----------
     model_path : str, optional
-        Path to ONNX model. If None, uses bundled model.
+        Path to ONNX model. If None, uses bundled model or downloads.
     verbose : bool
         If True, show detailed ONNX Runtime logs
         
@@ -208,22 +274,21 @@ def load_model(model_path: Optional[str] = None, verbose: bool = False) -> DAQOn
     Raises
     ------
     FileNotFoundError
-        If the model file cannot be found
+        If the model file cannot be found or downloaded
     """
     if model_path is None:
-        model_path = get_model_path()
+        model_path = get_model_path(auto_download=True)
     
     model_path = Path(model_path)
     if not model_path.exists():
-        home_path = Path.home() / ".chimerax" / "daq_model" / "Multimodel.onnx"
+        home_path = Path.home() / ".chimerax" / "daq_model" / MODEL_FILENAME
         raise FileNotFoundError(
             f"ONNX model not found: {model_path}\n\n"
             f"The DAQ score computation requires the ONNX model file.\n"
-            f"Please install it by either:\n"
-            f"  1. Copying Multimodel.onnx to: {model_path}\n"
-            f"  2. Or copying to: {home_path}\n"
-            f"  3. Or setting DAQ_MODEL_PATH environment variable\n\n"
-            f"Generate the model using: python scripts/export_onnx.py"
+            f"Automatic download failed. Please install manually:\n"
+            f"  1. Download from: {MODEL_URL}\n"
+            f"  2. Save to: {home_path}\n"
+            f"  3. Or set DAQ_MODEL_PATH environment variable"
         )
     
     return DAQOnnxModel(model_path, verbose=verbose)
