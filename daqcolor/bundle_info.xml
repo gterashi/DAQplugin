@@ -1,5 +1,5 @@
 <BundleInfo name="ChimeraX-DaqColor"
-            version="0.8" package="chimerax.daqcolor"
+            version="0.9" package="chimerax.daqcolor"
             minSessionVersion="1" maxSessionVersion="1">
 
   <Author>Genki Terashi</Author>
@@ -25,10 +25,6 @@
     <Dependency name="onnxruntime" version=">=1.16.0"/>
     <Dependency name="mrcfile" version=">=1.4.0"/>
   </Dependencies>
-
-  <DataFiles package="chimerax.daqcolor">
-    <DataFile>data/Multimodel.onnx</DataFile>
-  </DataFiles>
 
   <Classifiers>
     <PythonClassifier>Development Status :: 4 - Beta</PythonClassifier>
