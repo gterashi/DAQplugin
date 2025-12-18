@@ -144,28 +144,32 @@ daqcolor apply ./points_AA_ATOM_SS_swap.npy #1 metric atom_score
 #### Live recoloring
 
 ```
-daqcolor monitor model [npyPath] [k N] [half_window N] [colormap] [metric] [atomName] [on true|false]
+daqcolor monitor model [npy_path npyPath] [k N] [half_window N] [colormap] [metric] [atomName] [on true|false]
 ```
 
 **Parameters:**
-- `model` : ChimeraX model ID (e.g., `#1`)
-- `npyPath` : Path to the numpy file (required when turning monitor on)
+- `model` : ChimeraX model ID (e.g., `#1`) - **required**
+- `npy_path` : Path to the numpy file - **required when turning monitor on, not needed when turning off**
 - `k` : Number of nearest neighbors for kNN (default: 1)
 - `half_window` : Window averaging half-width (default: 9)
 - `colormap` : Optional colormap for visualization
 - `metric` : Scoring metric (`aa_score`, `atom_score`, or `aa_conf:<AA>`)
 - `atomName` : Atom name (default: CA)
-- `on` : Enable (`true`) or disable (`false`) monitoring
+- `on` : Enable (`true`) or disable (`false`) monitoring (default: `true`)
 
 **Examples:**
 
 ```bash
-# Start monitoring
-daqcolor monitor #2 ./points_AA_ATOM_SS_swap.npy metric aa_score on true
+# Start monitoring (npy_path required)
+daqcolor monitor #2 npy_path ./points_AA_ATOM_SS_swap.npy metric aa_score
 
-# Stop monitoring
+# Stop monitoring (simpler - no npy_path needed)
 daqcolor monitor #2 on false
 ```
+
+**Notes:**
+- If you run `daqcolor monitor` on the same model multiple times, it will automatically replace the previous monitor
+- To stop monitoring, use `on false` without specifying the npy_path
 ### Example: EMD-22456 and mis-aligned model
 
 - **Mis-aligned model**  
@@ -227,52 +231,19 @@ daqcolor clear
 
 The `daqscore` commands allow you to compute DAQ scores directly within ChimeraX using ONNX Runtime inference.
 
-#### Check GPU availability
-
-```bash
-daqscore info
-```
-
-This command displays:
-- ONNX Runtime version
-- Available execution providers (CPU, CUDA)
-- GPU availability status
-- ONNX model location and status
-- Recommended device setting
-
-**Example output:**
-```
-==================================================
-DAQ Score Device Information
-==================================================
-ONNX Runtime version: 1.16.0
-Available execution providers:
-  - CUDAExecutionProvider
-  - CPUExecutionProvider
-
-CUDA GPU: Available
-  Use 'device cuda' for GPU acceleration
-
-Recommended device: cuda
-==================================================
-```
-
----
-
 #### Compute DAQ scores from a map
 
 ```bash
-daqscore compute mapInput [output npyPath] [contour value] [stride N] [device auto|cpu|cuda] [batchSize N] [maxPoints N] [model modelPath] [monitor #model] [metric] [half_window N]
+daqscore compute mapInput contour [output npyPath] [stride N] [batch_size N] [max_points N] [model modelPath] [monitor #model] [metric] [half_window N]
 ```
 
 **Parameters:**
-- `mapInput`: Path to MRC/MAP file OR ChimeraX Volume model (e.g., `#1`)
+- `mapInput`: Path to MRC/MAP file OR ChimeraX Volume model (e.g., `#1`) - **required**
+- `contour`: Contour threshold value - **required**
 - `output`: Path to save output NPY file (auto-generated if not specified)
-- `contour`: Contour threshold value (default: 0.0)
 - `stride`: Stride for point sampling (default: 2, higher=faster but less dense)
-- `device`: Inference device - `auto` (default), `cpu`, or `cuda`
-- `batchSize`: Batch size for inference (default: 512)
-- `maxPoints`: Maximum number of points to sample (default: 500000)
+- `batch_size`: Batch size for inference (default: 512)
+- `max_points`: Maximum number of points to sample (default: 500000)
 - `model`: Optional path to ONNX model file (uses bundled model if not specified)
 - `monitor`: Optional structure model to auto-color and monitor
 - `metric`: Coloring metric for monitoring (`aa_score`, `atom_score`, or `aa_conf:<AA>`, default: `aa_score`)
@@ -282,13 +253,13 @@ daqscore compute mapInput [output npyPath] [contour value] [stride N] [device au
 
 ```bash
 # Compute from a file path
-daqscore compute /path/to/map.mrc output /path/to/output.npy
+daqscore compute /path/to/map.mrc 0.5 output /path/to/output.npy
 
-# Compute from loaded volume with GPU
-daqscore compute #1 device cuda
+# Compute from loaded volume (contour value required)
+daqscore compute #1 0.5
 
 # Compute and auto-monitor structure
-daqscore compute #1 monitor #2 metric aa_score half_window 9
+daqscore compute #1 0.5 monitor #2 metric aa_score half_window 9
 ```
 
 ---
@@ -296,20 +267,19 @@ daqscore compute #1 monitor #2 metric aa_score half_window 9
 #### Compute and apply coloring in one step
 
 ```bash
-daqscore run mapInput structure [output npyPath] [contour value] [stride N] [device auto|cpu|cuda] [batchSize N] [maxPoints N] [model modelPath] [metric] [k N] [colormap] [half_window N]
+daqscore run mapInput contour structure [output npyPath] [stride N] [batch_size N] [max_points N] [model modelPath] [metric] [k N] [colormap] [half_window N]
 ```
 
 This command combines computation and coloring in a single step.
 
 **Parameters:**
-- `mapInput`: Path to MRC/MAP file OR ChimeraX Volume model (e.g., `#1`)
-- `structure`: Structure model to color (e.g., `#2`)
+- `mapInput`: Path to MRC/MAP file OR ChimeraX Volume model (e.g., `#1`) - **required**
+- `contour`: Contour threshold value - **required**
+- `structure`: Structure model to color (e.g., `#2`) - **required**
 - `output`: Path to save output NPY file (auto-generated if not specified)
-- `contour`: Contour threshold value (default: 0.0)
 - `stride`: Stride for point sampling (default: 2)
-- `device`: Inference device - `auto` (default), `cpu`, or `cuda`
-- `batchSize`: Batch size for inference (default: 512)
-- `maxPoints`: Maximum number of points to sample (default: 500000)
+- `batch_size`: Batch size for inference (default: 512)
+- `max_points`: Maximum number of points to sample (default: 500000)
 - `model`: Optional path to ONNX model file
 - `metric`: Coloring metric (`aa_score`, `atom_score`, or `aa_conf:<AA>`, default: `aa_score`)
 - `k`: Number of nearest neighbors for kNN (default: 1)
@@ -322,10 +292,10 @@ This command combines computation and coloring in a single step.
 # Load map and structure, then compute and color
 open map.mrc
 open model.pdb
-daqscore run #1 #2 device cuda metric aa_score
+daqscore run #1 0.5 #2 metric aa_score
 
 # With custom parameters
-daqscore run #1 #2 device cuda metric atom_score k 1 half_window 9
+daqscore run #1 0.5 #2 metric atom_score k 1 half_window 9
 ```
 
 ---
@@ -354,12 +324,7 @@ The script will:
 
 #### Manual Setup
 
-**1. Check current status:**
-```bash
-daqscore info
-```
-
-**2. Install ONNX Runtime GPU (if CUDA GPU available):**
+**1. Install ONNX Runtime GPU (if CUDA GPU available):**
 
 From ChimeraX Python environment or system terminal:
 
@@ -371,19 +336,19 @@ pip uninstall onnxruntime
 pip install onnxruntime-gpu
 ```
 
-**3. Verify GPU is available:**
+**2. Verify GPU setup:**
+
+Run the setup script to verify:
 ```bash
-daqscore info
+python scripts/setup_gpu.py --check-only
 ```
 
-You should see `CUDAExecutionProvider` in the available providers list.
+**3. Use GPU in computation commands:**
 
-**4. Use GPU in commands:**
+Simply specify the contour threshold and the plugin will use the available GPU:
 ```bash
-daqscore compute #1 device cuda
+daqscore compute #1 0.5
 ```
-
-Or use `device auto` to automatically select GPU if available, otherwise CPU.
 
 #### GPU vs CPU Performance
 

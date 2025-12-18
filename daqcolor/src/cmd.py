@@ -307,6 +307,13 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
     if on:
         if npy_path is None:
             raise ValueError("npy_path must be provided when turning monitor on.")
+
+        # Remove existing monitor if one exists to prevent handler leak
+        existing = _MON.get(key)
+        if existing and "handler" in existing:
+            session.triggers.remove_handler(existing["handler"])
+            session.logger.info("daqcolor monitor: replacing existing monitor")
+
         _recolor(session, model, npy_path, k, colormap, metric, atom_name, None, None, halfwindow=half_window)
 
         def _tick(trigger_name, change_info):
@@ -333,10 +340,10 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
             session.logger.info("daqcolor monitor OFF")
 
 daqcolor_monitor_desc = CmdDesc(
-    required=[("npy_path", StringArg),("model", ModelArg)],
-    keyword=[("k", IntArg), ("colormap", ColormapArg),
+    required=[("model", ModelArg)],
+    keyword=[("npy_path", StringArg), ("k", IntArg), ("colormap", ColormapArg),
              ("metric", StringArg), ("atom_name", StringArg),("half_window", IntArg), ("on", BoolArg)],
-    synopsis="Start/stop live recoloring (new frame trigger)"
+    synopsis="Start/stop live recoloring (new frame trigger). Use 'on false' to stop monitoring without npy_path."
 )
 
 # --- add: show points as markers --------------------------------------------
