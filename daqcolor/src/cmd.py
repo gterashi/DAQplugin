@@ -243,26 +243,37 @@ def _recolor(session, model, npy_path, k, cmap, metric, atom_name, clamp_min, cl
         x = np.clip(scal, float(clamp_min), float(clamp_max))
 
     # 残基ごとの RGBA
-    res_rgba_f = cmap.interpolated_rgba(x)
+    # Handle NaN values in scores before color interpolation
+    x_safe = np.where(np.isfinite(x), x, 0.0)
+    res_rgba_f = cmap.interpolated_rgba(x_safe)
+    
+    # Mark residues without neighbors as green
+    green = np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float32)
     if not np.all(has_nbr):
-        green = np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float32)
         res_rgba_f[~has_nbr] = green
+    # Also mark NaN scores as green
+    nan_mask = ~np.isfinite(x)
+    if np.any(nan_mask):
+        res_rgba_f[nan_mask] = green
 
-    res_rgba = (np.clip(res_rgba_f,0,1)*255).astype(np.uint8)
+    res_rgba = (np.clip(res_rgba_f, 0, 1) * 255).astype(np.uint8)
     residues.ribbon_colors = res_rgba
 
     # 原子ごとの RGBA（残基→原子に展開）
     ats = residues.atoms
-    vals_atom = np.repeat(x, residues.num_atoms)     # 
+    vals_atom = np.repeat(x_safe, residues.num_atoms)
     atom_rgba_f = cmap.interpolated_rgba(vals_atom)
 
     if not np.all(has_nbr):
-        atom_mask = np.repeat(~has_nbr, residues.num_atoms)  # 
+        atom_mask = np.repeat(~has_nbr, residues.num_atoms)
         atom_rgba_f[atom_mask] = green
-
+    # Also mark NaN scores as green for atoms
+    if np.any(nan_mask):
+        atom_nan_mask = np.repeat(nan_mask, residues.num_atoms)
+        atom_rgba_f[atom_nan_mask] = green
 
     atom_rgba = np.ascontiguousarray(
-        (np.clip(atom_rgba_f,0.0,1.0)*255).astype(np.uint8)
+        (np.clip(atom_rgba_f, 0.0, 1.0) * 255).astype(np.uint8)
     )
     ats.colors = atom_rgba
 
@@ -296,10 +307,25 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
     if on:
         if npy_path is None:
             raise ValueError("npy_path must be provided when turning monitor on.")
+
+        # Remove existing monitor if one exists to prevent handler leak
+        existing = _MON.get(key)
+        if existing and "handler" in existing:
+            session.triggers.remove_handler(existing["handler"])
+            session.logger.info("daqcolor monitor: replacing existing monitor")
+
         _recolor(session, model, npy_path, k, colormap, metric, atom_name, None, None, halfwindow=half_window)
 
         def _tick(trigger_name, change_info):
             try:
+                # Check if model is still valid (not deleted)
+                if model.deleted:
+                    # Model was deleted, remove the handler
+                    info = _MON.pop(key, None)
+                    if info and "handler" in info:
+                        session.triggers.remove_handler(info["handler"])
+                    session.logger.info("daqcolor monitor stopped (model deleted)")
+                    return
                 _recolor(session, model, npy_path, k, colormap, metric, atom_name, None, None, halfwindow=half_window)
             except Exception as e:
                 session.logger.warning(f"daqcolor monitor error: {e}")
@@ -314,10 +340,10 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
             session.logger.info("daqcolor monitor OFF")
 
 daqcolor_monitor_desc = CmdDesc(
-    required=[("npy_path", StringArg),("model", ModelArg)],
-    keyword=[("k", IntArg), ("colormap", ColormapArg),
+    required=[("model", ModelArg)],
+    keyword=[("npy_path", StringArg), ("k", IntArg), ("colormap", ColormapArg),
              ("metric", StringArg), ("atom_name", StringArg),("half_window", IntArg), ("on", BoolArg)],
-    synopsis="Start/stop live recoloring (new frame trigger)"
+    synopsis="Start/stop live recoloring (new frame trigger). Use 'on false' to stop monitoring without npy_path."
 )
 
 # --- add: show points as markers --------------------------------------------
@@ -410,5 +436,248 @@ def daqcolor_clear(session):
 daqcolor_clear_desc = CmdDesc(
     required=[],
     synopsis="Close all marker models created by 'daqcolor points'"
+)
+
+
+# ===========================================================================
+# DAQ Score Computation Commands
+# ===========================================================================
+
+from chimerax.core.commands import OpenFileNameArg, SaveFileNameArg, Or
+from chimerax.map import MapArg
+
+
+def daqscore_compute(session, map_input, contour, *, output=None, stride=2,
+                     batch_size=512, max_points=500000, model=None,
+                     monitor=None, metric="aa_score", half_window=9):
+    """
+    Compute DAQ scores from a cryo-EM map.
+    
+    Parameters
+    ----------
+    session : ChimeraX session
+    map_input : str or Volume
+        Path to input MRC/MAP file OR a ChimeraX Volume model (e.g., #1)
+    contour : float
+        Contour threshold for density map
+    output : str, optional
+        Path to save output NPY file (auto-generated if not specified)
+    stride : int
+        Stride for point sampling (default: 2)
+    batch_size : int
+        Batch size for inference (default: 512)
+    max_points : int
+        Maximum number of points (default: 500000)
+    model : str, optional
+        Path to ONNX model (uses bundled model if not specified)
+    monitor : Model, optional
+        Structure model to auto-monitor after computation
+    metric : str
+        Coloring metric for monitoring: "aa_score", "atom_score", or "aa_conf:XXX"
+    half_window : int
+        Half window size for score smoothing (default: 9)
+    """
+    from pathlib import Path
+    from chimerax.map import Volume
+    
+    # Check for onnxruntime
+    try:
+        import onnxruntime
+    except ImportError:
+        session.logger.error(
+            "onnxruntime is not installed. Please install it with:\n"
+            "  pip install onnxruntime"
+        )
+        return
+    
+    from .compute import compute_daq_scores
+    
+    # Determine if input is a Volume model or file path
+    if isinstance(map_input, Volume):
+        # Input is an already-loaded ChimeraX Volume
+        volume = map_input
+        map_name = volume.name or f"volume_{volume.id_string}"
+        session.logger.info(f"Computing DAQ scores for volume: #{volume.id_string} ({map_name})")
+        
+        # Generate output path if not specified
+        if output is None:
+            # Use current working directory with volume name
+            output = Path.cwd() / f"{map_name.replace(' ', '_')}_daq_scores.npy"
+        
+        map_source = volume  # Pass Volume object directly
+    else:
+        # Input is a file path
+        map_path = Path(map_input)
+        session.logger.info(f"Computing DAQ scores for file: {map_path}")
+        
+        # Generate output path if not specified
+        if output is None:
+            output = map_path.parent / f"{map_path.stem}_daq_scores.npy"
+        
+        map_source = map_path  # Pass path
+    
+    session.logger.info(f"  Output: {output}")
+    session.logger.info(f"  Contour: {contour}, Stride: {stride}")
+    
+    try:
+        points, scores = compute_daq_scores(
+            session,
+            map_source,
+            output_path=output,
+            contour=contour,
+            stride=stride,
+            batch_size=batch_size,
+            max_points=max_points,
+            model_path=model,
+        )
+        
+        session.logger.info(f"DAQ score computation completed!")
+        session.logger.info(f"  Points: {points.shape[0]}")
+        session.logger.info(f"  Output saved to: {output}")
+        
+        # Auto-monitor if structure specified
+        if monitor is not None:
+            session.logger.info(f"Starting auto-monitor for structure #{monitor.id_string}...")
+            # Apply initial coloring
+            _recolor(session, monitor, str(output), 1, None, metric, "CA", 
+                     None, None, halfwindow=half_window)
+            # Start monitoring
+            daqcolor_monitor(session, monitor, npy_path=str(output), k=1, colormap=None,
+                           metric=metric, atom_name="CA", half_window=half_window, on=True)
+        
+        return str(output)
+        
+    except Exception as e:
+        session.logger.error(f"DAQ score computation failed: {e}")
+        raise
+
+
+daqscore_compute_desc = CmdDesc(
+    required=[("map_input", Or(MapArg, OpenFileNameArg)), ("contour", FloatArg)],
+    keyword=[
+        ("output", SaveFileNameArg),
+        ("stride", IntArg),
+        ("batch_size", IntArg),
+        ("max_points", IntArg),
+        ("model", OpenFileNameArg),
+        ("monitor", ModelArg),
+        ("metric", StringArg),
+        ("half_window", IntArg),
+    ],
+    synopsis="Compute DAQ scores from a cryo-EM map (file path or loaded volume #id)"
+)
+
+
+def daqscore_run(session, map_input, contour, structure, *, output=None, stride=2,
+                 batch_size=512, max_points=500000, model=None,
+                 metric="aa_score", k=1, colormap=None, half_window=9):
+    """
+    Compute DAQ scores and apply coloring to a structure in one step.
+    
+    Parameters
+    ----------
+    session : ChimeraX session
+    map_input : str or Volume
+        Path to input MRC/MAP file OR a ChimeraX Volume model (e.g., #1)
+    contour : float
+        Contour threshold for density map
+    structure : Model
+        Structure model to color
+    output : str, optional
+        Path to save output NPY file
+    stride : int
+        Stride for point sampling (default: 2)
+    batch_size : int
+        Batch size for inference (default: 512)
+    max_points : int
+        Maximum number of points (default: 500000)
+    model : str, optional
+        Path to ONNX model
+    metric : str
+        Coloring metric: "aa_score", "atom_score", or "aa_conf:XXX"
+    k : int
+        Number of nearest neighbors for coloring (default: 1)
+    colormap : Colormap, optional
+        Color map for visualization
+    half_window : int
+        Half window size for score smoothing (default: 9)
+    """
+    from pathlib import Path
+    from chimerax.map import Volume
+    
+    # Check for onnxruntime
+    try:
+        import onnxruntime
+    except ImportError:
+        session.logger.error(
+            "onnxruntime is not installed. Please install it with:\n"
+            "  pip install onnxruntime"
+        )
+        return
+    
+    from .compute import compute_daq_scores
+    
+    # Determine if input is a Volume model or file path
+    if isinstance(map_input, Volume):
+        volume = map_input
+        map_name = volume.name or f"volume_{volume.id_string}"
+        session.logger.info(f"Computing DAQ scores for volume: #{volume.id_string}")
+        
+        if output is None:
+            output = Path.cwd() / f"{map_name.replace(' ', '_')}_daq_scores.npy"
+        
+        map_source = volume
+    else:
+        map_path = Path(map_input)
+        session.logger.info(f"Computing DAQ scores for file: {map_path}")
+        
+        if output is None:
+            output = map_path.parent / f"{map_path.stem}_daq_scores.npy"
+        
+        map_source = map_path
+    
+    session.logger.info(f"Computing DAQ scores and applying to structure #{structure.id_string}...")
+    
+    try:
+        # Step 1: Compute DAQ scores
+        points, scores = compute_daq_scores(
+            session,
+            map_source,
+            output_path=output,
+            contour=contour,
+            stride=stride,
+            batch_size=batch_size,
+            max_points=max_points,
+            model_path=model,
+        )
+        
+        # Step 2: Apply coloring to structure
+        session.logger.info(f"Applying DAQ coloring to structure #{structure.id_string}...")
+        _recolor(session, structure, str(output), k, colormap, metric, "CA", 
+                 None, None, halfwindow=half_window)
+        
+        session.logger.info(f"DAQ score computation and coloring completed!")
+        
+        return str(output)
+        
+    except Exception as e:
+        session.logger.error(f"DAQ score computation failed: {e}")
+        raise
+
+
+daqscore_run_desc = CmdDesc(
+    required=[("map_input", Or(MapArg, OpenFileNameArg)), ("contour", FloatArg), ("structure", ModelArg)],
+    keyword=[
+        ("output", SaveFileNameArg),
+        ("stride", IntArg),
+        ("batch_size", IntArg),
+        ("max_points", IntArg),
+        ("model", OpenFileNameArg),
+        ("metric", StringArg),
+        ("k", IntArg),
+        ("colormap", ColormapArg),
+        ("half_window", IntArg),
+    ],
+    synopsis="Compute DAQ scores and apply coloring to a structure (accepts file path or volume #id)"
 )
 
