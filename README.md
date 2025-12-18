@@ -233,6 +233,9 @@ The `daqscore` commands allow you to compute DAQ scores directly within ChimeraX
 
 #### Compute DAQ scores from a map
 
+> **Note**  
+> For large maps or if you have a weak CPU, consider using the [Colab version](https://colab.research.google.com/github/gterashi/DAQplugin/blob/main/DAQ_Score_Grid.ipynb) instead, which provides better performance with GPU acceleration.
+
 ```bash
 daqscore compute mapInput contour [output npyPath] [stride N] [batch_size N] [max_points N] [model modelPath] [monitor #model] [metric] [half_window N]
 ```
