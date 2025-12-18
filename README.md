@@ -4,11 +4,11 @@ DAQplugin is a collection of tools for computing, visualizing, and exporting **D
 
 This repository provides:
 
-- Google Colab ready Jupyter notebooks for DAQ score computation and NPY file generation [DAQ_Score_Grid.ipynb](https://colab.research.google.com/github/gterashi/DAQplugin/blob/main/DAQ_Score_Grid.ipynb) 
-- A ChimeraX plugin (`daqcolor`) for interactive coloring and visualization  
-- Command-line utilities for processing and file export  
+- Google Colab ready Jupyter notebooks for DAQ score computation and NPY file generation [DAQ_Score_Grid.ipynb](https://colab.research.google.com/github/gterashi/DAQplugin/blob/main/DAQ_Score_Grid.ipynb)
+- A ChimeraX plugin (`daqcolor`) for interactive coloring and visualization
+- Command-line utilities for processing and file export
 
-DAQ and DiffModeler are included as Git submodules to ensure consistency with published methods.
+DAQ is included as a Git submodule to ensure consistency with published methods.
 
 ---
 
@@ -17,15 +17,15 @@ DAQ and DiffModeler are included as Git submodules to ensure consistency with pu
 ```
 DAQplugin/
 ├── DAQ/                  # DAQ core (git submodule)
-├── DiffModeler/          # DiffModeler core (git submodule)
 ├── daqcolor/             # ChimeraX plugin
 │   ├── src/
 │   ├── bundle_info.xml
 │   └── 00README.txt
 ├── cli/                  # Command-line scripts
-├── map_util/             # Map preprocessing utilities (zarr v3)
+├── map_util/             # Map preprocessing utilities
 ├── DAQ_Score.ipynb       # DAQ score calculation notebook
 ├── DAQ_Score_Grid.ipynb  # Grid / NPY generation notebook
+├── daq_score_grid.py     # Standalone DAQ scoring script
 ├── README.md
 └── LICENSE
 ```
@@ -387,7 +387,7 @@ Residues within
 ---
 ## Notes
 
-- DAQ and DiffModeler are included as submodules to ensure consistency.
+- DAQ is included as a submodule to ensure consistency with published methods.
 - The ChimeraX plugin is intended for visualization and inspection.
 - Numerical analysis should be performed via notebooks or CLI tools.
 - This repository is under active development.

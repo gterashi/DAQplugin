@@ -28,7 +28,7 @@ from tqdm import tqdm
 # Import DAQ modules
 import map_util.prep_points_from_mrc as prep
 from map_util.dataset_map import MapPointPatchDataset
-import DiffModeler.data_processing.Resize_Map as resize_map
+from map_util.resize_map import resize_map
 from DAQ.models.resnet import resnet18 as resnet18_multi
 
 
@@ -97,7 +97,7 @@ def process_map(map_path, output_dir, contour=0.0, stride=2, max_points=500000):
     new_map_path = resampled_dir / f"{map_id}_resampled.map"
     if not new_map_path.exists():
         print(f"Resizing map: {map_path} -> {new_map_path}")
-        resize_map.Resize_Map(str(map_path), str(new_map_path))
+        resize_map(str(map_path), str(new_map_path))
 
     # Prepare points
     protein_entry = {
