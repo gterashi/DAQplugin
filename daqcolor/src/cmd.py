@@ -302,7 +302,7 @@ daqcolor_apply_desc = CmdDesc(
 )
 
 def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
-                     metric="aa_score", atom_name="CA", half_window=9, on=True):
+                     metric="aa_score", atom_name="CA", half_window=9, on=True, interval=0.5):
     key = (session, model.id_string)
     if on:
         if npy_path is None:
@@ -316,6 +316,9 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
 
         _recolor(session, model, npy_path, k, colormap, metric, atom_name, None, None, halfwindow=half_window)
 
+        import time
+        last_update = [time.time()]  # Use list to allow modification in nested function
+
         def _tick(trigger_name, change_info):
             try:
                 # Check if model is still valid (not deleted)
@@ -326,13 +329,18 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
                         session.triggers.remove_handler(info["handler"])
                     session.logger.info("daqcolor monitor stopped (model deleted)")
                     return
-                _recolor(session, model, npy_path, k, colormap, metric, atom_name, None, None, halfwindow=half_window)
+
+                # Throttle updates based on interval
+                current_time = time.time()
+                if current_time - last_update[0] >= interval:
+                    _recolor(session, model, npy_path, k, colormap, metric, atom_name, None, None, halfwindow=half_window)
+                    last_update[0] = current_time
             except Exception as e:
                 session.logger.warning(f"daqcolor monitor error: {e}")
 
         h = session.triggers.add_handler("new frame", _tick)
         _MON[key] = {"handler": h}
-        session.logger.info("daqcolor monitor ON (recolor on new frame)")
+        session.logger.info(f"daqcolor monitor ON (recolor every {interval}s)")
     else:
         info = _MON.pop(key, None)
         if info and "handler" in info:
@@ -342,8 +350,8 @@ def daqcolor_monitor(session, model, *, npy_path=None, k=1, colormap=None,
 daqcolor_monitor_desc = CmdDesc(
     required=[("model", ModelArg)],
     keyword=[("npy_path", StringArg), ("k", IntArg), ("colormap", ColormapArg),
-             ("metric", StringArg), ("atom_name", StringArg),("half_window", IntArg), ("on", BoolArg)],
-    synopsis="Start/stop live recoloring (new frame trigger). Use 'on false' to stop monitoring without npy_path."
+             ("metric", StringArg), ("atom_name", StringArg),("half_window", IntArg), ("on", BoolArg), ("interval", FloatArg)],
+    synopsis="Start/stop live recoloring with throttling. interval (default 0.5s) controls update frequency. Use 'on false' to stop monitoring."
 )
 
 # --- add: show points as markers --------------------------------------------
@@ -539,11 +547,11 @@ def daqscore_compute(session, map_input, contour, *, output=None, stride=2,
         if monitor is not None:
             session.logger.info(f"Starting auto-monitor for structure #{monitor.id_string}...")
             # Apply initial coloring
-            _recolor(session, monitor, str(output), 1, None, metric, "CA", 
+            _recolor(session, monitor, str(output), 1, None, metric, "CA",
                      None, None, halfwindow=half_window)
-            # Start monitoring
+            # Start monitoring (with default 0.5s interval)
             daqcolor_monitor(session, monitor, npy_path=str(output), k=1, colormap=None,
-                           metric=metric, atom_name="CA", half_window=half_window, on=True)
+                           metric=metric, atom_name="CA", half_window=half_window, on=True, interval=0.5)
         
         return str(output)
         
