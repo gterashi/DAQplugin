@@ -231,6 +231,9 @@ daqcolor clear
 
 The `daqscore` commands allow you to compute DAQ scores directly within ChimeraX using ONNX Runtime inference.
 
+> **Recommendation**  
+> For large maps or if you have a weak CPU, consider using the [Google Colab notebook](https://colab.research.google.com/github/gterashi/DAQplugin/blob/main/DAQ_Score_Grid.ipynb) instead, which provides free GPU acceleration and can handle larger datasets more efficiently.
+
 #### Compute DAQ scores from a map
 
 ```bash
