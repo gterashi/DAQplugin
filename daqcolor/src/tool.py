@@ -1,5 +1,10 @@
 # src/tool.py
 import os
+try:
+    from importlib.metadata import PackageNotFoundError, version as package_version
+except Exception:  # pragma: no cover - older bundled Python fallback
+    PackageNotFoundError = Exception
+    package_version = None
 from chimerax.core.tools import ToolInstance
 from chimerax.ui import MainToolWindow
 from chimerax.core.commands import run
@@ -13,13 +18,49 @@ from Qt.QtWidgets import (
 
 from Qt.QtCore import Qt, QAbstractTableModel
 
-from Qt.QtGui import QDesktopServices
+from Qt.QtGui import QDesktopServices, QGuiApplication
 from Qt.QtCore import QUrl, QTimer
 
 # Import cross-platform GPU detection from constants
 from .constants import PLATFORM, detect_nvidia_gpus
 
-from .cmd import _compute_residue_scores
+from .cmd import _MON, _compute_residue_scores
+
+
+_FALLBACK_VERSION = "1.0.4"
+
+
+def _daqplugin_version() -> str:
+    if package_version is None:
+        return _FALLBACK_VERSION
+    try:
+        return package_version("ChimeraX-DAQplugin")
+    except PackageNotFoundError:
+        return _FALLBACK_VERSION
+    except Exception:
+        return _FALLBACK_VERSION
+
+
+def _adaptive_ui_scale() -> float:
+    """
+    Scale chrome/spacing for the available logical screen height.
+
+    Qt reports logical pixels after OS DPI scaling, so a Windows display at
+    125-150% naturally has a smaller available height here.
+    """
+    try:
+        screen = QGuiApplication.primaryScreen()
+        height = screen.availableGeometry().height() if screen is not None else 0
+    except Exception:
+        height = 0
+
+    if height <= 720:
+        return 0.82
+    if height <= 820:
+        return 0.88
+    if height <= 950:
+        return 0.94
+    return 1.0
 
 
 class ResidueTableModel(QAbstractTableModel):
@@ -118,6 +159,7 @@ class DAQTool(ToolInstance):
         super().__init__(session, tool_name)
         self.display_name = "DAQplugin"
         self._residue_table_cache = None
+        self._computed_grid_npy_path = None
         
         self.tool_window = MainToolWindow(self, close_destroys=True)
 
@@ -192,6 +234,7 @@ class DAQTool(ToolInstance):
             self.structure_combo.setCurrentIndex(structure_index)
         if volume_index >= 0:
             self.volume_combo.setCurrentIndex(volume_index)
+        self._sync_next_action_buttons()
 
     def _refresh_gpu_list(self):
         """Populate GPU device combo with detected NVIDIA GPUs (Linux only).
@@ -296,6 +339,105 @@ class DAQTool(ToolInstance):
             outp = f"{outp}.npy"
         return outp
 
+    def _set_widget_state(self, widget, key: str, value):
+        if widget is None:
+            return
+        if widget.property(key) == value:
+            return
+        widget.setProperty(key, value)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _set_button_variant(self, button, variant: str):
+        self._set_widget_state(button, "variant", variant)
+
+    def _grid_output_is_current(self) -> bool:
+        outp = self._normalized_output_npy_path()
+        return bool(outp and outp == self._computed_grid_npy_path)
+
+    def _sync_next_action_buttons(self, *_args):
+        if not hasattr(self, "output_edit") or not hasattr(self, "load_edit"):
+            return
+
+        output_text = self.output_edit.text().strip()
+        load_text = self.load_edit.text().strip()
+        structure_ready = self._structure_token_or_none() is not None
+        output_current = self._grid_output_is_current()
+        output_waiting_compute = bool(output_text and not output_current)
+        missing_any_npy_source = not output_text and not load_text
+        map_ready = self._map_input_token() is not None
+
+        output_state = ""
+        if output_current:
+            output_state = "ready"
+        elif output_waiting_compute or missing_any_npy_source:
+            output_state = "missing"
+
+        load_state = "ready" if load_text else ("missing" if missing_any_npy_source else "")
+        self._set_widget_state(self.output_edit, "requiredState", output_state)
+        self._set_widget_state(self.load_edit, "requiredState", load_state)
+
+        self._set_button_variant(
+            getattr(self, "output_browse_button", None),
+            "attention" if missing_any_npy_source else "pill-link",
+        )
+        self._set_button_variant(
+            getattr(self, "load_browse_button", None),
+            "attention" if missing_any_npy_source else "pill-link",
+        )
+        self._set_button_variant(
+            getattr(self, "grid_compute_button", None),
+            "attention" if output_waiting_compute else "primary",
+        )
+
+        color_variant = "ready" if load_text and structure_ready else "primary"
+        self._set_button_variant(getattr(self, "color_apply_button", None), color_variant)
+        self._set_button_variant(getattr(self, "live_start_button", None), color_variant)
+
+        if hasattr(self, "output_browse_button"):
+            self.output_browse_button.setToolTip(
+                "Choose where to save a new NPY file, then select a Map and run Calculate DAQ Scores."
+                if missing_any_npy_source else
+                "Choose where computed DAQ scores will be saved."
+            )
+        if hasattr(self, "load_browse_button"):
+            self.load_browse_button.setToolTip(
+                "Choose an existing NPY file, or set Output NPY and calculate new scores."
+                if missing_any_npy_source else
+                "Choose an existing NPY file for coloring, monitoring, tables, and arrows."
+            )
+        if hasattr(self, "grid_compute_button"):
+            if output_waiting_compute:
+                self.grid_compute_button.setToolTip(
+                    "Output NPY is set. Select a Map, then run this to create the NPY scores."
+                    if not map_ready else
+                    "Output NPY is set. Run this to generate the new NPY scores."
+                )
+            else:
+                self.grid_compute_button.setToolTip(
+                    "Generate grid-based DAQ scores from the selected Map and save them to Output NPY."
+                )
+        if hasattr(self, "color_apply_button"):
+            if load_text and structure_ready:
+                tooltip = "Ready: color the selected Structure using Load NPY."
+            elif load_text:
+                tooltip = "Load NPY is set. Select a Structure to color it."
+            elif structure_ready:
+                tooltip = "Structure is selected. Set Load NPY, or calculate Output NPY first."
+            else:
+                tooltip = "Select a Structure and set Load NPY, or calculate Output NPY first."
+            self.color_apply_button.setToolTip(tooltip)
+        if hasattr(self, "live_start_button") and not self._monitor_running_for_selected_structure():
+            if load_text and structure_ready:
+                tooltip = "Ready: start automatic recoloring of the selected Structure using Load NPY."
+            elif load_text:
+                tooltip = "Load NPY is set. Select a Structure before starting live update."
+            elif structure_ready:
+                tooltip = "Structure is selected. Set Load NPY, or calculate Output NPY first."
+            else:
+                tooltip = "Select a Structure and set Load NPY, or calculate Output NPY first."
+            self.live_start_button.setToolTip(tooltip)
+
     # ---------------- Requirements / warnings ----------------
     def _require_map_and_npy(self, context: str) -> bool:
         """
@@ -388,9 +530,17 @@ class DAQTool(ToolInstance):
     def _build_ui(self):
         parent = self.tool_window.ui_area
         root = QWidget(parent)
+        ui_scale = _adaptive_ui_scale()
+
+        def sp(value: int, minimum: int = 0) -> int:
+            return max(minimum, int(round(value * ui_scale)))
+
+        def fp(value: int, minimum: int = 11) -> int:
+            return max(minimum, int(round(value * ui_scale)))
+
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(6, 6, 6, 6)
-        outer.setSpacing(4)
+        outer.setContentsMargins(sp(6), sp(6), sp(6), sp(6))
+        outer.setSpacing(sp(4))
 
         root.setStyleSheet("""
             QWidget {
@@ -494,6 +644,15 @@ class DAQTool(ToolInstance):
                 line-height: 1.14;
                 letter-spacing: 0.2px;
             }
+            QLabel[role="version-badge"] {
+                color: rgba(255, 255, 255, 0.78);
+                background: rgba(255, 255, 255, 0.10);
+                border: 1px solid rgba(255, 255, 255, 0.16);
+                border-radius: 10px;
+                padding: 3px 8px;
+                font-size: 12px;
+                font-weight: 600;
+            }
             QLabel[role="caption"] {
                 font-size: 12px;
                 color: rgba(255, 255, 255, 0.72);
@@ -516,12 +675,28 @@ class DAQTool(ToolInstance):
                 font-family: "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
                 font-size: 13px;
             }
+            QLineEdit[requiredState="missing"] {
+                border: 1px solid #ff9f0a;
+                background: rgba(255, 159, 10, 0.12);
+            }
+            QLineEdit[requiredState="ready"] {
+                border: 1px solid rgba(48, 209, 88, 0.78);
+                background: rgba(48, 209, 88, 0.10);
+            }
             QWidget[section="dark"] QLineEdit,
             QWidget[section="dark"] QComboBox,
             QWidget[section="dark"] QSpinBox,
             QWidget[section="dark"] QDoubleSpinBox {
                 background: #272729;
                 color: #ffffff;
+            }
+            QWidget[section="dark"] QLineEdit[requiredState="missing"] {
+                border: 1px solid #ffb340;
+                background: rgba(255, 159, 10, 0.14);
+            }
+            QWidget[section="dark"] QLineEdit[requiredState="ready"] {
+                border: 1px solid rgba(48, 209, 88, 0.82);
+                background: rgba(48, 209, 88, 0.12);
             }
             QTableWidget, QTableView {
                 background: #111113;
@@ -582,6 +757,24 @@ class DAQTool(ToolInstance):
             QPushButton[variant="primary"]:hover {
                 background: #0077ed;
             }
+            QPushButton[variant="attention"] {
+                background: #ff9f0a;
+                color: #111113;
+                border: 1px solid transparent;
+                font-weight: 600;
+            }
+            QPushButton[variant="attention"]:hover {
+                background: #ffb340;
+            }
+            QPushButton[variant="ready"] {
+                background: #30d158;
+                color: #111113;
+                border: 1px solid transparent;
+                font-weight: 600;
+            }
+            QPushButton[variant="ready"]:hover {
+                background: #3fe667;
+            }
             QPushButton[variant="secondary-dark"] {
                 background: #2a2a2d;
                 color: #ffffff;
@@ -601,6 +794,15 @@ class DAQTool(ToolInstance):
             QPushButton[variant="secondary-gray"]:checked {
                 background: #5a5a5f;
                 border: 1px solid rgba(255, 255, 255, 0.28);
+            }
+            QPushButton:disabled,
+            QPushButton[variant="primary"]:disabled,
+            QPushButton[variant="secondary-gray"]:disabled,
+            QPushButton[variant="attention"]:disabled,
+            QPushButton[variant="ready"]:disabled {
+                background: #2a2a2d;
+                color: rgba(255, 255, 255, 0.42);
+                border: 1px solid rgba(255, 255, 255, 0.08);
             }
             QPushButton[variant="pill-link"] {
                 background: transparent;
@@ -630,14 +832,90 @@ class DAQTool(ToolInstance):
             QWidget[section="dark"] QCheckBox {
                 color: #ffffff;
             }
+            QLabel[role="monitor-status"] {
+                font-size: 12px;
+                font-weight: 600;
+                padding: 5px 9px;
+                border-radius: 10px;
+                min-height: 18px;
+            }
+            QLabel[role="monitor-status"][state="running"] {
+                color: #b6f2c2;
+                background: rgba(52, 199, 89, 0.18);
+                border: 1px solid rgba(52, 199, 89, 0.38);
+            }
+            QLabel[role="monitor-status"][state="stopped"] {
+                color: rgba(255, 255, 255, 0.72);
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+            }
+        """)
+        root.setStyleSheet(root.styleSheet() + f"""
+            QWidget {{
+                font-size: {fp(13, 12)}px;
+            }}
+            QTabBar::tab {{
+                padding: {sp(8, 5)}px {sp(18, 12)}px;
+                margin-right: {sp(6, 4)}px;
+                min-width: {sp(92, 76)}px;
+                font-size: {fp(12, 11)}px;
+            }}
+            QLabel {{
+                font-size: {fp(14, 12)}px;
+            }}
+            QLabel[role="field-label"] {{
+                font-size: {fp(13, 12)}px;
+            }}
+            QLabel[role="title"] {{
+                font-size: {fp(20, 18)}px;
+            }}
+            QLabel[role="version-badge"] {{
+                padding: {sp(3, 2)}px {sp(8, 6)}px;
+                font-size: {fp(12, 11)}px;
+            }}
+            QLabel[role="caption"] {{
+                font-size: {fp(12, 11)}px;
+            }}
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+                border-radius: {sp(12, 8)}px;
+                padding: {sp(6, 4)}px {sp(10, 7)}px;
+                min-height: {sp(22, 18)}px;
+                font-size: {fp(13, 12)}px;
+            }}
+            QPushButton {{
+                border-radius: {sp(14, 9)}px;
+                padding: {sp(6, 4)}px {sp(13, 8)}px;
+                min-height: {sp(22, 18)}px;
+                font-size: {fp(13, 12)}px;
+            }}
+            QTableView {{
+                border-radius: {sp(12, 8)}px;
+                font-size: {fp(13, 12)}px;
+            }}
+            QTableView::item {{
+                padding: {sp(6, 4)}px {sp(8, 6)}px;
+            }}
+            QHeaderView::section {{
+                padding: {sp(8, 5)}px {sp(10, 7)}px;
+                font-size: {fp(13, 12)}px;
+            }}
+            QCheckBox {{
+                spacing: {sp(8, 5)}px;
+                font-size: {fp(14, 12)}px;
+            }}
+            QLabel[role="monitor-status"] {{
+                padding: {sp(5, 3)}px {sp(9, 6)}px;
+                min-height: {sp(18, 15)}px;
+                font-size: {fp(12, 11)}px;
+            }}
         """)
 
         def make_field_box(title: str, card: str = "light", layout_cls=QVBoxLayout):
             box = QFrame(root)
             box.setProperty("card", card)
             outer_layout = QVBoxLayout(box)
-            outer_layout.setContentsMargins(12, 10, 12, 10)
-            outer_layout.setSpacing(6)
+            outer_layout.setContentsMargins(sp(12), sp(10), sp(12), sp(10))
+            outer_layout.setSpacing(sp(6))
 
             label = QLabel(title, box)
             label.setProperty("role", "field-label")
@@ -650,7 +928,7 @@ class DAQTool(ToolInstance):
                 layout.setContentsMargins(0, 0, 0, 0)
             else:
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.setSpacing(6)
+                layout.setSpacing(sp(6))
             outer_layout.addWidget(content)
 
             return box, layout, label
@@ -660,7 +938,7 @@ class DAQTool(ToolInstance):
             button.setProperty("variant", variant)
             button.setToolTip(tooltip)
             button.clicked.connect(slot)
-            button.setMinimumWidth(min_width)
+            button.setMinimumWidth(sp(min_width, 70))
             button.style().unpolish(button)
             button.style().polish(button)
             return button
@@ -671,20 +949,20 @@ class DAQTool(ToolInstance):
         main_tab = QWidget(root)
         main_tab.setProperty("section", "dark")
         main_layout = QVBoxLayout(main_tab)
-        main_layout.setContentsMargins(12, 10, 12, 12)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(sp(12), sp(10), sp(12), sp(12))
+        main_layout.setSpacing(sp(8))
 
         params_tab = QWidget(root)
         params_tab.setProperty("section", "dark")
         params_layout = QVBoxLayout(params_tab)
-        params_layout.setContentsMargins(12, 10, 12, 12)
-        params_layout.setSpacing(8)
+        params_layout.setContentsMargins(sp(12), sp(10), sp(12), sp(12))
+        params_layout.setSpacing(sp(8))
 
         table_tab = QWidget(root)
         table_tab.setProperty("section", "dark")
         table_layout = QVBoxLayout(table_tab)
-        table_layout.setContentsMargins(12, 10, 12, 12)
-        table_layout.setSpacing(8)
+        table_layout.setContentsMargins(sp(12), sp(10), sp(12), sp(12))
+        table_layout.setSpacing(sp(8))
 
         self.tabs.addTab(main_tab, "MAIN")
         self.tabs.addTab(params_tab, "Parameters")
@@ -692,18 +970,28 @@ class DAQTool(ToolInstance):
 
         # ---- Main tab: inputs ----
         input_grid = QGridLayout()
-        input_grid.setHorizontalSpacing(10)
-        input_grid.setVerticalSpacing(8)
+        input_grid.setHorizontalSpacing(sp(10))
+        input_grid.setVerticalSpacing(sp(8))
 
+        main_header_row = QHBoxLayout()
+        main_header_row.setContentsMargins(0, 0, 0, 0)
+        main_header_row.setSpacing(sp(8))
         main_header = QLabel("DAQplugin", root)
         main_header.setProperty("role", "title")
-        main_layout.addWidget(main_header)
+        version_badge = QLabel(f"v{_daqplugin_version()}", root)
+        version_badge.setProperty("role", "version-badge")
+        version_badge.setToolTip("Installed DAQplugin bundle version")
+        main_header_row.addWidget(main_header)
+        main_header_row.addStretch(1)
+        main_header_row.addWidget(version_badge, 0, Qt.AlignRight | Qt.AlignVCenter)
+        main_layout.addLayout(main_header_row)
 
         structure_box, structure_layout, structure_label = make_field_box("Structure", card="dark")
-        structure_box.setToolTip("Select the atomic structure model to evaluate")
-        structure_label.setToolTip("Select the atomic structure model to evaluate")
+        structure_box.setToolTip("Select the atomic structure model to color, inspect, or evaluate")
+        structure_label.setToolTip("Select the atomic structure model to color, inspect, or evaluate")
         self.structure_combo = QComboBox(root)
-        self.structure_combo.setToolTip("Select the atomic structure model to evaluate")
+        self.structure_combo.setToolTip("Select the atomic structure model to color, inspect, or evaluate")
+        self.structure_combo.currentIndexChanged.connect(self._sync_next_action_buttons)
         structure_layout.addWidget(self.structure_combo)
         input_grid.addWidget(structure_box, 0, 0)
 
@@ -716,64 +1004,69 @@ class DAQTool(ToolInstance):
         input_grid.addWidget(map_box, 0, 1)
 
         output_box, output_layout, output_label = make_field_box("Output NPY", card="dark")
-        output_box.setToolTip("Path to save computed scores in NPY format")
-        output_label.setToolTip("Path to save computed scores in NPY format")
+        output_box.setToolTip("Path where newly calculated DAQ scores will be saved as an NPY file")
+        output_label.setToolTip("Path where newly calculated DAQ scores will be saved as an NPY file")
         self.output_edit = QLineEdit(root)
-        self.output_edit.setToolTip("Path to save computed scores in NPY format")
+        self.output_edit.setToolTip("Path where newly calculated DAQ scores will be saved as an NPY file")
         btn_out = QPushButton("Choose File", root)
         btn_out.setProperty("variant", "pill-link")
-        btn_out.setToolTip("Browse for NPY file location")
+        btn_out.setToolTip("Choose where computed DAQ scores will be saved")
         btn_out.clicked.connect(lambda: self._browse_save_file(self.output_edit, "Save NPY"))
         btn_out.style().unpolish(btn_out)
         btn_out.style().polish(btn_out)
+        self.output_browse_button = btn_out
         output_row = QHBoxLayout()
         output_row.setContentsMargins(0, 0, 0, 0)
-        output_row.setSpacing(8)
+        output_row.setSpacing(sp(8))
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(btn_out)
         output_layout.addLayout(output_row)
         input_grid.addWidget(output_box, 1, 0)
 
         load_box, load_layout, load_label = make_field_box("Load NPY", card="dark")
-        load_box.setToolTip("Path to load existing scores from NPY file")
-        load_label.setToolTip("Path to load existing scores from NPY file")
+        load_box.setToolTip("NPY file used for coloring, live monitoring, residue table, and shift arrows")
+        load_label.setToolTip("NPY file used for coloring, live monitoring, residue table, and shift arrows")
         self.load_edit = QLineEdit(root)
-        self.load_edit.setToolTip("Path to load existing scores from NPY file")
+        self.load_edit.setToolTip("NPY file used for coloring, live monitoring, residue table, and shift arrows")
         btn_load = QPushButton("Choose File", root)
         btn_load.setProperty("variant", "pill-link")
-        btn_load.setToolTip("Browse for existing NPY file")
+        btn_load.setToolTip("Choose an NPY file to use for coloring and analysis")
         btn_load.clicked.connect(lambda: self._browse_open_file(self.load_edit, "Load NPY"))
         btn_load.style().unpolish(btn_load)
         btn_load.style().polish(btn_load)
+        self.load_browse_button = btn_load
         load_row = QHBoxLayout()
         load_row.setContentsMargins(0, 0, 0, 0)
-        load_row.setSpacing(8)
+        load_row.setSpacing(sp(8))
         load_row.addWidget(self.load_edit, 1)
         load_row.addWidget(btn_load)
         load_layout.addLayout(load_row)
         input_grid.addWidget(load_box, 1, 1)
+        self.output_edit.textChanged.connect(self._sync_next_action_buttons)
+        self.load_edit.textChanged.connect(self._sync_next_action_buttons)
 
         main_layout.addLayout(input_grid)
 
         run_daq_group, run_daq_layout, _ = make_field_box("Grid-based DAQ", card="dark", layout_cls=QHBoxLayout)
-        run_daq_layout.setSpacing(10)
+        run_daq_layout.setSpacing(sp(10))
 
         btn_grid = make_button(
             "Calculate DAQ Scores",
-            "Compute DAQ scores on a 3D grid of points around the structure",
+            "Generate grid-based DAQ scores from the selected Map and save them to Output NPY",
             self._run_compute_grid,
             variant="primary",
             min_width=160,
         )
+        self.grid_compute_button = btn_grid
         run_daq_layout.addWidget(btn_grid, 0, Qt.AlignLeft)
         run_daq_layout.addStretch(1)
         main_layout.addWidget(run_daq_group)
 
         metric_box, metric_layout, metric_label = make_field_box("Metric", card="dark")
-        metric_box.setToolTip("Scoring metric: aa_score (Amino-acid-based) or atom_score (C-alpha Atom-based)")
-        metric_label.setToolTip("Scoring metric: aa_score (Amino-acid-based) or atom_score (C-alpha Atom-based)")
+        metric_box.setToolTip("Scoring metric: amino-acid, C-alpha atom, or secondary-structure DAQ score")
+        metric_label.setToolTip("Scoring metric: amino-acid, C-alpha atom, or secondary-structure DAQ score")
         self.metric_combo = QComboBox(root)
-        self.metric_combo.setToolTip("Scoring metric: aa_score (Amino-acid-based) or atom_score (C-alpha Atom-based)")
+        self.metric_combo.setToolTip("Scoring metric: amino-acid, C-alpha atom, or secondary-structure DAQ score")
         self.metric_combo.addItem("DAQ(AA)", "aa_score")
         self.metric_combo.addItem("DAQ(Ca)", "atom_score")
         self.metric_combo.addItem("DAQ(SS)", "ss_score")
@@ -782,47 +1075,55 @@ class DAQTool(ToolInstance):
         main_layout.addWidget(metric_box)
 
         color_group, color_layout, _ = make_field_box("Coloring / Monitoring", card="dark", layout_cls=QHBoxLayout)
-        color_layout.setSpacing(10)
+        color_layout.setSpacing(sp(10))
 
         btn_apply = make_button(
             "Color Structure",
-            "Color the structure once using existing Grid-based DAQ scores from NPY file",
+            "Color the selected Structure once using the scores in Load NPY",
             self._run_color_apply,
             variant="primary",
             min_width=140,
         )
+        self.color_apply_button = btn_apply
         color_layout.addWidget(btn_apply)
 
-        btn_start = make_button(
+        self.live_start_button = make_button(
             "Start Live Update",
-            "Start automatic monitoring and coloring with specified update interval",
+            "Start automatic recoloring of the selected Structure using Load NPY",
             lambda: self._run_color_monitor(on=True),
             variant="primary",
             min_width=155,
         )
-        color_layout.addWidget(btn_start)
+        color_layout.addWidget(self.live_start_button)
 
-        btn_stop = make_button(
+        self.live_stop_button = make_button(
             "Stop Update",
-            "Stop automatic monitoring and coloring",
+            "Stop automatic recoloring for the selected Structure",
             lambda: self._run_color_monitor(on=False),
             variant="secondary-gray",
             min_width=88,
         )
-        color_layout.addWidget(btn_stop)
+        color_layout.addWidget(self.live_stop_button)
+
+        self.live_status_label = QLabel("Live update: Stopped", root)
+        self.live_status_label.setProperty("role", "monitor-status")
+        self.live_status_label.setProperty("state", "stopped")
+        self.live_status_label.setToolTip("Shows whether live recoloring is currently running for the selected structure")
+        color_layout.addWidget(self.live_status_label)
+        color_layout.addStretch(1)
         main_layout.addWidget(color_group)
 
         arrow_group, arrow_layout, _ = make_field_box("Sequence Shift Suggestions", card="dark")
-        arrow_layout.setSpacing(8)
+        arrow_layout.setSpacing(sp(8))
 
         arrow_button_grid = QGridLayout()
-        arrow_button_grid.setHorizontalSpacing(10)
-        arrow_button_grid.setVerticalSpacing(10)
+        arrow_button_grid.setHorizontalSpacing(sp(10))
+        arrow_button_grid.setVerticalSpacing(sp(10))
         arrow_button_grid.setContentsMargins(0, 0, 0, 0)
 
         btn_arrow = make_button(
             "Show Shift Arrows",
-            "Draw backbone-shift suggestion cones. If residues are selected, only selected residues are processed; otherwise the whole model is processed",
+            "Draw backbone-shift suggestion cones using the selected Structure and Load NPY",
             lambda: self._run_arrowwin(apply_constraints=False),
             variant="primary",
             min_width=150,
@@ -840,7 +1141,7 @@ class DAQTool(ToolInstance):
 
         btn_add_constraints = make_button(
             "Add Arrow Constraints",
-            "Draw arrows and also add ISOLDE position restraints based on residue mapping",
+            "Draw shift arrows using Load NPY and add ISOLDE position restraints",
             lambda: self._run_arrowwin(apply_constraints=True),
             variant="primary",
             min_width=160,
@@ -859,11 +1160,11 @@ class DAQTool(ToolInstance):
         main_layout.addWidget(arrow_group)
 
         atom_group, atom_layout, _ = make_field_box("Atom Position Based DAQ", card="dark", layout_cls=QHBoxLayout)
-        atom_layout.setSpacing(10)
+        atom_layout.setSpacing(sp(10))
 
         btn_pdb = make_button(
             "Calculate Atom-Based DAQ",
-            "Compute DAQ scores for structure atoms and apply coloring (original DAQ method)",
+            "Compute atom-position DAQ scores from the selected Structure and Map, save Output NPY, and color the Structure",
             self._run_compute_pdb,
             variant="primary",
             min_width=250,
@@ -879,8 +1180,8 @@ class DAQTool(ToolInstance):
         params_layout.addWidget(params_header)
 
         compute_group, compute_layout, _ = make_field_box("Compute Settings", card="dark", layout_cls=QGridLayout)
-        compute_layout.setHorizontalSpacing(10)
-        compute_layout.setVerticalSpacing(6)
+        compute_layout.setHorizontalSpacing(sp(10))
+        compute_layout.setVerticalSpacing(sp(6))
 
         batch_label = QLabel("Batch size", root)
         batch_label.setToolTip(
@@ -902,7 +1203,7 @@ class DAQTool(ToolInstance):
         # GPU = picking "CPU" from this combo. Forced values raise on
         # unavailability; "Auto" follows the platform fallback chain.
         backend_label = QLabel("Backend", root)
-        compute_layout.addWidget(backend_label, 1, 0)
+        compute_layout.addWidget(backend_label, 0, 2)
         self.backend_combo = QComboBox(root)
         self.backend_combo.setToolTip(
             "Inference backend. 'Auto' uses the platform fallback chain "
@@ -928,16 +1229,18 @@ class DAQTool(ToolInstance):
             backend_options += [("CPU", "cpu")]
         for label, value in backend_options:
             self.backend_combo.addItem(label, value)
-        compute_layout.addWidget(self.backend_combo, 1, 1)
+        compute_layout.addWidget(self.backend_combo, 0, 3)
+        compute_layout.setColumnStretch(1, 1)
+        compute_layout.setColumnStretch(3, 1)
 
         # GPU device picker — only meaningful on Linux/NVIDIA. Hidden on
         # Mac (single Apple GPU) and Windows (DirectML device selection
         # not surfaced through our backend).
         if PLATFORM == 'linux':
             gpu_row = QHBoxLayout()
-            gpu_row.setSpacing(6)
+            gpu_row.setSpacing(sp(6))
             self.gpu_combo = QComboBox(root)
-            self.gpu_combo.setMinimumWidth(220)
+            self.gpu_combo.setMinimumWidth(sp(220, 160))
             self.gpu_combo.setToolTip(
                 "NVIDIA device for tensorrt/cuda backends. "
                 "Ignored when backend is CPU.")
@@ -945,14 +1248,14 @@ class DAQTool(ToolInstance):
 
             btn_refresh_gpu = QPushButton(root)
             btn_refresh_gpu.setIcon(root.style().standardIcon(QStyle.SP_BrowserReload))
-            btn_refresh_gpu.setFixedWidth(30)
+            btn_refresh_gpu.setFixedWidth(sp(30, 24))
             btn_refresh_gpu.setToolTip("Refresh GPU list")
             btn_refresh_gpu.clicked.connect(self._refresh_gpu_list)
             gpu_row.addWidget(btn_refresh_gpu)
             self._gpu_refresh_btn = btn_refresh_gpu
             gpu_label = QLabel("GPU device", root)
-            compute_layout.addWidget(gpu_label, 2, 0)
-            compute_layout.addLayout(gpu_row, 2, 1)
+            compute_layout.addWidget(gpu_label, 1, 0)
+            compute_layout.addLayout(gpu_row, 1, 1, 1, 3)
 
             # Populate GPU list at startup and wire enable-sync.
             self._refresh_gpu_list()
@@ -963,8 +1266,8 @@ class DAQTool(ToolInstance):
         params_layout.addWidget(compute_group)
 
         grid_group, grid_layout, _ = make_field_box("Grid Settings", card="dark", layout_cls=QGridLayout)
-        grid_layout.setHorizontalSpacing(10)
-        grid_layout.setVerticalSpacing(6)
+        grid_layout.setHorizontalSpacing(sp(10))
+        grid_layout.setVerticalSpacing(sp(6))
 
         contour_label = QLabel("Contour", root)
         contour_label.setToolTip("Density threshold for grid sampling (auto-syncs with map display)")
@@ -987,18 +1290,22 @@ class DAQTool(ToolInstance):
 
         max_points_label = QLabel("Max Points", root)
         max_points_label.setToolTip("Maximum number of grid points to evaluate (limits computation time)")
-        grid_layout.addWidget(max_points_label, 1, 0)
+        grid_layout.addWidget(max_points_label, 0, 4)
         self.mp_spin = QSpinBox(root)
         self.mp_spin.setRange(1000, 100000000)
         self.mp_spin.setValue(500000)
         self.mp_spin.setToolTip("Maximum number of grid points to evaluate (limits computation time)")
-        grid_layout.addWidget(self.mp_spin, 1, 1)
+        grid_layout.addWidget(self.mp_spin, 0, 5)
+        grid_layout.setColumnStretch(1, 1)
+        grid_layout.setColumnStretch(3, 1)
+        grid_layout.setColumnStretch(5, 1)
         params_layout.addWidget(grid_group)
 
         # Auto Update contour level ---
         self._contour_user_override = False
         self.contour_spin.valueChanged.connect(self._on_contour_spin_changed_by_user)
         self.volume_combo.currentIndexChanged.connect(self._sync_contour_from_map_display)
+        self.volume_combo.currentIndexChanged.connect(self._sync_next_action_buttons)
         self._contour_timer = QTimer(root)
         self._contour_timer.setInterval(500)
         self._contour_timer.timeout.connect(self._sync_contour_from_map_display)
@@ -1006,8 +1313,8 @@ class DAQTool(ToolInstance):
         self._sync_contour_from_map_display()
 
         scoring_group, scoring_layout, _ = make_field_box("Scoring Settings", card="dark", layout_cls=QGridLayout)
-        scoring_layout.setHorizontalSpacing(10)
-        scoring_layout.setVerticalSpacing(6)
+        scoring_layout.setHorizontalSpacing(sp(10))
+        scoring_layout.setVerticalSpacing(sp(6))
 
         k_label = QLabel("k", root)
         k_label.setToolTip("Number of nearest neighbors for kNN (k-nearest neighbors) local density evaluation")
@@ -1029,8 +1336,8 @@ class DAQTool(ToolInstance):
         params_layout.addWidget(scoring_group)
 
         color_params_group, color_params_layout, _ = make_field_box("Coloring Settings", card="dark", layout_cls=QGridLayout)
-        color_params_layout.setHorizontalSpacing(10)
-        color_params_layout.setVerticalSpacing(6)
+        color_params_layout.setHorizontalSpacing(sp(10))
+        color_params_layout.setVerticalSpacing(sp(6))
 
         cmin_label = QLabel("Clamp min", root)
         cmin_label.setToolTip("Minimum value for color scale clamping (scores below this value are mapped to blue)")
@@ -1071,8 +1378,8 @@ class DAQTool(ToolInstance):
         params_layout.addWidget(color_params_group)
 
         arrow_params_group, arrow_params_layout, _ = make_field_box("Sequence Shift Suggestion Parameters", card="dark", layout_cls=QGridLayout)
-        arrow_params_layout.setHorizontalSpacing(10)
-        arrow_params_layout.setVerticalSpacing(6)
+        arrow_params_layout.setHorizontalSpacing(sp(10))
+        arrow_params_layout.setVerticalSpacing(sp(6))
 
         nwin_label = QLabel("Half window", root)
         nwin_label.setToolTip("Half-window size for scoring window around each residue")
@@ -1187,7 +1494,7 @@ class DAQTool(ToolInstance):
 
         table_status_row = QHBoxLayout()
         table_status_row.setContentsMargins(0, 0, 0, 0)
-        table_status_row.setSpacing(8)
+        table_status_row.setSpacing(sp(8))
 
         self.table_status_label = QLabel("Open this tab to load the current DAQ score table.", root)
         self.table_status_label.setProperty("role", "caption")
@@ -1212,7 +1519,7 @@ class DAQTool(ToolInstance):
         self.residue_table.setAlternatingRowColors(True)
         self.residue_table.setSortingEnabled(True)
         self.residue_table.setUpdatesEnabled(True)
-        self.residue_table.verticalHeader().setDefaultSectionSize(26)
+        self.residue_table.verticalHeader().setDefaultSectionSize(sp(26, 20))
         self.residue_table.verticalHeader().setVisible(False)
         self.residue_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.residue_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -1225,7 +1532,7 @@ class DAQTool(ToolInstance):
         # ---- Footer help link ----
         manual_url = "https://cxtoolshed.rbvi.ucsf.edu/apps/chimeraxdaqplugin"
         footer_row = QHBoxLayout()
-        footer_row.setContentsMargins(2, 0, 2, 0)
+        footer_row.setContentsMargins(sp(2), 0, sp(2), 0)
 
         footer_hint = QLabel("Hover over controls for details.", root)
         footer_hint.setProperty("role", "caption")
@@ -1233,7 +1540,7 @@ class DAQTool(ToolInstance):
         footer_row.addStretch(1)
 
         text_label = QLabel(f'<a href="{manual_url}">DAQplugin User Manual</a>', root)
-        text_label.setStyleSheet('color: #0066cc; font-size: 14px;')
+        text_label.setStyleSheet(f'color: #0066cc; font-size: {fp(14, 12)}px;')
         text_label.setOpenExternalLinks(False)
         text_label.linkActivated.connect(
             lambda _=None, u=manual_url: QDesktopServices.openUrl(QUrl(u))
@@ -1247,7 +1554,59 @@ class DAQTool(ToolInstance):
 
         # initial refresh
         self._refresh_models()
+        self._sync_live_update_state()
+        self._sync_next_action_buttons()
+        self._monitor_status_timer = QTimer(root)
+        self._monitor_status_timer.setInterval(1000)
+        self._monitor_status_timer.timeout.connect(self._sync_live_update_state)
+        self._monitor_status_timer.start()
         self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _selected_monitor_key(self):
+        st = self._selected_structure()
+        if st is None:
+            return None
+        return (self.session, st.id_string)
+
+    def _monitor_running_for_selected_structure(self) -> bool:
+        key = self._selected_monitor_key()
+        if key is None:
+            return False
+        info = _MON.get(key)
+        return bool(info and "handler" in info)
+
+    def _set_live_status_label(self, text: str, state: str):
+        self.live_status_label.setText(text)
+        self.live_status_label.setProperty("state", state)
+        self.live_status_label.style().unpolish(self.live_status_label)
+        self.live_status_label.style().polish(self.live_status_label)
+
+    def _sync_live_update_state(self):
+        if not hasattr(self, "live_status_label"):
+            return
+
+        running = self._monitor_running_for_selected_structure()
+        load_text = self.load_edit.text().strip() if hasattr(self, "load_edit") else ""
+        structure_ready = self._structure_token_or_none() is not None
+        if running:
+            self.live_start_button.setText("Restart Live Update")
+            self.live_start_button.setToolTip("Live update is running. Click to restart it with the current settings.")
+            self.live_stop_button.setEnabled(True)
+            self._set_live_status_label("Live update: Running", "running")
+        else:
+            self.live_start_button.setText("Start Live Update")
+            if load_text and structure_ready:
+                tooltip = "Ready: start automatic recoloring of the selected Structure using Load NPY."
+            elif load_text:
+                tooltip = "Load NPY is set. Select a Structure before starting live update."
+            elif structure_ready:
+                tooltip = "Structure is selected. Set Load NPY, or calculate Output NPY first."
+            else:
+                tooltip = "Select a Structure and set Load NPY, or calculate Output NPY first."
+            self.live_start_button.setToolTip(tooltip)
+            self.live_stop_button.setEnabled(False)
+            self._set_live_status_label("Live update: Stopped", "stopped")
+        self._sync_next_action_buttons()
 
     def _on_tab_changed(self, index):
         if index == getattr(self, "_table_tab_index", -1):
@@ -1485,8 +1844,10 @@ class DAQTool(ToolInstance):
             run(self.session, cmd)
         except Exception:
             return
+        self._computed_grid_npy_path = outp
         self.load_edit.setText(outp)
         self._capture_scores_from_structure_bfactors(self._selected_structure())
+        self._sync_next_action_buttons()
 
     def _run_compute_pdb(self):
         if not self._require_map_and_npy("compute_pdb"):
@@ -1617,7 +1978,10 @@ class DAQTool(ToolInstance):
             cmd += " log_timing true"
 
         self.session.logger.info(f"Running: {cmd}")
-        run(self.session, cmd)
+        try:
+            run(self.session, cmd)
+        finally:
+            self._sync_live_update_state()
 
     # ---- ArrowWin ----
     def _run_arrowwin(self, apply_constraints: bool = False):

@@ -1,5 +1,6 @@
 # vim: set expandtab shiftwidth=4 softtabstop=4:
 import numpy as np
+import sys
 from chimerax.core.commands import (CmdDesc, StringArg, IntArg, BoolArg,
                                     ColormapArg, FloatArg, ModelArg,run)
 
@@ -31,6 +32,36 @@ def _log_compute_timings(session, timings):
     session.logger.info(f"  3. Score assignment: {assign_time:.2f} s")
     session.logger.info(f"  Total: {total_time:.2f} s")
     session.logger.status(f"DAQ timing total: {total_time:.2f} s", color="blue")
+
+
+def _ensure_onnxruntime_importable(session):
+    """Import ONNX Runtime and log actionable details when import fails."""
+    try:
+        import onnxruntime  # noqa: F401
+        return True
+    except ImportError as exc:
+        user_site = None
+        try:
+            import site
+            user_site = site.getusersitepackages()
+        except Exception:
+            pass
+
+        details = [
+            "onnxruntime could not be imported by ChimeraX Python.",
+            f"ImportError: {exc}",
+            f"Python executable: {sys.executable}",
+            f"Python version: {sys.version.splitlines()[0]}",
+        ]
+        if user_site:
+            details.append(f"User site-packages: {user_site}")
+        details.extend([
+            "",
+            "Please install or repair ONNX Runtime in this ChimeraX Python:",
+            f"  {sys.executable} -m pip install --force-reinstall onnxruntime",
+        ])
+        session.logger.error("\n".join(details))
+        return False
 
 
 # kNN search
@@ -900,14 +931,7 @@ def daqscore_compute_grid(session, map_input, contour, *, structure=None, output
     # idempotent but having two call sites for the same side effect is
     # bit-rot bait.
 
-    # Check for onnxruntime
-    try:
-        import onnxruntime
-    except ImportError:
-        session.logger.error(
-            "onnxruntime is not installed. Please install it with:\n"
-            "  pip install onnxruntime"
-        )
+    if not _ensure_onnxruntime_importable(session):
         return
     from .compute import compute_daq_scores, normalize_npy_output_path
     
@@ -1071,14 +1095,7 @@ def daqscore_compute_pdb(session, map_input, *, structure=None, output=None,
     from .onnx_model import _preload_cuda_libraries
     _preload_cuda_libraries()
 
-    # Check for onnxruntime
-    try:
-        import onnxruntime
-    except ImportError:
-        session.logger.error(
-            "onnxruntime is not installed. Please install it with:\n"
-            "  pip install onnxruntime"
-        )
+    if not _ensure_onnxruntime_importable(session):
         return
 
     from .compute import compute_daq_scores_pdb, normalize_npy_output_path
