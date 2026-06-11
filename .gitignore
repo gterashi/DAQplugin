@@ -223,3 +223,4 @@ CLAUDE.md
 # bundle. Regeneration: tools/convert_pth_to_mlx.py.
 daqcolor/src/data/*.npz
 daqcolor/data/*.npz
+daqcolor/*.npy
