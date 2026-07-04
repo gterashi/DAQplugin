@@ -1941,6 +1941,14 @@ class DAQTool(ToolInstance):
         self.plot_refresh_button.style().polish(self.plot_refresh_button)
         plot_control_row.addWidget(self.plot_refresh_button, 0, Qt.AlignRight)
 
+        self.plot_clear_selection_button = QPushButton("Clear Selection", root)
+        self.plot_clear_selection_button.setProperty("variant", "secondary-gray")
+        self.plot_clear_selection_button.setToolTip("Clear the current ChimeraX selection")
+        self.plot_clear_selection_button.clicked.connect(self._clear_plot_selection)
+        self.plot_clear_selection_button.style().unpolish(self.plot_clear_selection_button)
+        self.plot_clear_selection_button.style().polish(self.plot_clear_selection_button)
+        plot_control_row.addWidget(self.plot_clear_selection_button, 0, Qt.AlignRight)
+
         plot_layout.addLayout(plot_control_row)
 
         self.residue_plot = ResiduePlotWidget(root)
@@ -2359,6 +2367,14 @@ class DAQTool(ToolInstance):
             )
         except Exception as e:
             self.session.logger.error(f"Failed to select plot residue range {low}-{high}: {e}")
+
+    def _clear_plot_selection(self):
+        try:
+            run(self.session, "select clear", log=False)
+            self.session.logger.status("Cleared selection.", color="blue")
+            self._set_plot_status("Cleared ChimeraX selection.")
+        except Exception as e:
+            self.session.logger.error(f"Failed to clear selection: {e}")
 
     # ---------------- Command runners ----------------
     def _run_compute_grid(self):
