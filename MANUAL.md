@@ -160,7 +160,7 @@ This tab shows chain ID, residue ID, amino-acid name, and window-averaged DAQ sc
 ### Per-Residue DAQ Plot tab
 
 This tab plots residue ID on the x-axis and DAQ score on the y-axis using the same data as the residue table. Click **Refresh** to recompute the scores. If the structure has multiple chains, choose a chain from the **Chain** dropdown; only the selected chain is shown in the plot. Hover over the line to show the nearest residue ID. Drag across a residue range in the plot to select those residues in ChimeraX. Click **Clear Selection** to clear the current ChimeraX selection.
-
+<img src="https://github.com/gterashi/DAQplugin/blob/main/img/plot.png?raw=true" width="200">
 ## Command Reference
 
 ### `daqscore compute_grid`
