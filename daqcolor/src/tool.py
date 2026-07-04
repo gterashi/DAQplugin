@@ -1,4 +1,5 @@
 # src/tool.py
+import math
 import os
 try:
     from importlib.metadata import PackageNotFoundError, version as package_version
@@ -13,12 +14,12 @@ from Qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QDoubleSpinBox,
     QSpinBox, QPushButton, QCheckBox, QGroupBox, QFileDialog, QComboBox,
     QToolButton, QFrame, QSizePolicy, QMessageBox, QGridLayout, QTabWidget,
-    QTableView, QAbstractItemView, QHeaderView, QStyle
+    QTableView, QAbstractItemView, QHeaderView, QStyle, QToolTip
 )
 
 from Qt.QtCore import Qt, QAbstractTableModel
 
-from Qt.QtGui import QDesktopServices, QGuiApplication
+from Qt.QtGui import QColor, QDesktopServices, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPen
 from Qt.QtCore import QUrl, QTimer
 
 # Import cross-platform GPU detection from constants
@@ -27,7 +28,7 @@ from .constants import PLATFORM, detect_nvidia_gpus
 from .cmd import _MON, _compute_residue_scores
 
 
-_FALLBACK_VERSION = "1.0.4"
+_FALLBACK_VERSION = "1.0.5"
 
 
 def _daqplugin_version() -> str:
@@ -117,6 +118,355 @@ class ResidueTableModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
 
+class ResiduePlotWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows = []
+        self._chain_id = None
+        self._metric_label = "DAQ Score"
+        self._message = "Load residue scores to draw a plot."
+        self._plot_state = None
+        self._drag_start_x = None
+        self._drag_current_x = None
+        self._range_selected_callback = None
+        self._last_hover_label = None
+        self.setMinimumHeight(260)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_range_selected_callback(self, callback):
+        self._range_selected_callback = callback
+
+    def set_data(self, rows, chain_id, metric_label="DAQ Score"):
+        self._rows = list(rows or [])
+        self._chain_id = chain_id
+        self._metric_label = metric_label or "DAQ Score"
+        self._message = ""
+        self._plot_state = None
+        self._drag_start_x = None
+        self._drag_current_x = None
+        self._last_hover_label = None
+        self.update()
+
+    def set_message(self, message):
+        self._rows = []
+        self._chain_id = None
+        self._message = message
+        self._plot_state = None
+        self._drag_start_x = None
+        self._drag_current_x = None
+        self._last_hover_label = None
+        self.update()
+
+    def _plot_records(self):
+        records = []
+        for row in self._rows:
+            if row.get("chain_id") != self._chain_id:
+                continue
+            score = row.get("score")
+            residue_number = row.get("residue_number")
+            if score is None or residue_number is None:
+                continue
+            if not math.isfinite(float(score)):
+                continue
+            records.append({
+                "x": float(residue_number),
+                "y": float(score),
+                "label": row.get("residue_label", ""),
+                "row": row,
+            })
+        return sorted(records, key=lambda r: (r["x"], r["label"]))
+
+    def _compute_plot_state(self, records):
+        if not records:
+            return None
+
+        rect = self.rect()
+        fm = QFontMetrics(self.font())
+        left = max(52, fm.horizontalAdvance("-0.000") + 14)
+        right = 20
+        top = 24
+        bottom = 42
+        plot_left = rect.left() + left
+        plot_right = rect.right() - right
+        plot_top = rect.top() + top
+        plot_bottom = rect.bottom() - bottom
+        plot_width = max(1, plot_right - plot_left)
+        plot_height = max(1, plot_bottom - plot_top)
+
+        xs = [record["x"] for record in records]
+        ys = [record["y"] for record in records]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        if xmin == xmax:
+            xmin -= 1.0
+            xmax += 1.0
+        ylimit = max(abs(ymin), abs(ymax), 0.5)
+        ylimit += max(ylimit * 0.08, 0.05)
+        ymin = -ylimit
+        ymax = ylimit
+
+        def map_x(x):
+            return plot_left + (x - xmin) / (xmax - xmin) * plot_width
+
+        def map_y(y):
+            return plot_bottom - (y - ymin) / (ymax - ymin) * plot_height
+
+        def value_from_x(px):
+            clamped = min(max(float(px), plot_left), plot_right)
+            return xmin + (clamped - plot_left) / plot_width * (xmax - xmin)
+
+        mapped_records = []
+        for record in records:
+            mapped = dict(record)
+            mapped["px"] = map_x(record["x"])
+            mapped["py"] = map_y(record["y"])
+            mapped_records.append(mapped)
+
+        return {
+            "plot_left": plot_left,
+            "plot_right": plot_right,
+            "plot_top": plot_top,
+            "plot_bottom": plot_bottom,
+            "plot_width": plot_width,
+            "plot_height": plot_height,
+            "xmin": xmin,
+            "xmax": xmax,
+            "ymin": ymin,
+            "ymax": ymax,
+            "map_x": map_x,
+            "map_y": map_y,
+            "value_from_x": value_from_x,
+            "records": mapped_records,
+        }
+
+    def _event_pos(self, event):
+        try:
+            pos = event.pos()
+            return pos.x(), pos.y()
+        except Exception:
+            pos = event.position()
+            return pos.x(), pos.y()
+
+    def _event_global_pos(self, event):
+        try:
+            return event.globalPos()
+        except Exception:
+            return event.globalPosition().toPoint()
+
+    def _inside_plot(self, x, y):
+        state = self._plot_state
+        if state is None:
+            return False
+        return (
+            state["plot_left"] <= x <= state["plot_right"]
+            and state["plot_top"] <= y <= state["plot_bottom"]
+        )
+
+    def _nearest_hover_record(self, x, y):
+        state = self._plot_state
+        if state is None:
+            return None
+        if not self._inside_plot(x, y):
+            return None
+        best = None
+        best_dx = None
+        for record in state["records"]:
+            dx = abs(record["px"] - x)
+            if best_dx is None or dx < best_dx:
+                best = record
+                best_dx = dx
+        if best is None or best_dx is None:
+            return None
+        if len(state["records"]) > 1:
+            hover_radius = max(18.0, state["plot_width"] / (len(state["records"]) - 1) * 0.55)
+        else:
+            hover_radius = state["plot_width"]
+        if best_dx > hover_radius:
+            return None
+        return best
+
+    def _draw_drag_range(self, painter):
+        state = self._plot_state
+        if state is None or self._drag_start_x is None or self._drag_current_x is None:
+            return
+        x1 = min(max(self._drag_start_x, state["plot_left"]), state["plot_right"])
+        x2 = min(max(self._drag_current_x, state["plot_left"]), state["plot_right"])
+        if abs(x2 - x1) < 2:
+            return
+        painter.fillRect(
+            int(x1),
+            int(state["plot_top"]),
+            int(x2 - x1),
+            int(state["plot_bottom"] - state["plot_top"]),
+            QColor(41, 151, 255, 54),
+        )
+        edge_pen = QPen(QColor("#8ec8ff"))
+        edge_pen.setWidth(1)
+        painter.setPen(edge_pen)
+        painter.drawLine(int(x1), int(state["plot_top"]), int(x1), int(state["plot_bottom"]))
+        painter.drawLine(int(x2), int(state["plot_top"]), int(x2), int(state["plot_bottom"]))
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        x, y = self._event_pos(event)
+        if self._inside_plot(x, y):
+            self._drag_start_x = x
+            self._drag_current_x = x
+            self.update()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        x, y = self._event_pos(event)
+        if self._drag_start_x is not None:
+            self._drag_current_x = x
+            self.update()
+            return
+
+        record = self._nearest_hover_record(x, y)
+        if record is None:
+            self._last_hover_label = None
+            QToolTip.hideText()
+            return
+
+        text = f"Residue {record['label']}\n{self._metric_label}: {record['y']:.4f}"
+        if text != self._last_hover_label:
+            QToolTip.showText(self._event_global_pos(event), text, self)
+            self._last_hover_label = text
+
+    def leaveEvent(self, event):
+        self._last_hover_label = None
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton or self._drag_start_x is None:
+            super().mouseReleaseEvent(event)
+            return
+
+        start_x = self._drag_start_x
+        end_x = self._drag_current_x if self._drag_current_x is not None else start_x
+        self._drag_start_x = None
+        self._drag_current_x = None
+        self.update()
+
+        state = self._plot_state
+        if state is None or abs(end_x - start_x) < 4:
+            return
+
+        residue_min = state["value_from_x"](min(start_x, end_x))
+        residue_max = state["value_from_x"](max(start_x, end_x))
+        if self._range_selected_callback is not None:
+            self._range_selected_callback(self._chain_id, residue_min, residue_max)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = self.rect()
+        painter.fillRect(rect, QColor("#111113"))
+
+        message = self._message
+        records = [] if message else self._plot_records()
+        if not message and not records:
+            message = "No finite DAQ scores for the selected chain."
+
+        if message:
+            self._plot_state = None
+            painter.setPen(QColor(210, 210, 214))
+            painter.drawText(rect, Qt.AlignCenter, message)
+            painter.end()
+            return
+
+        fm = QFontMetrics(painter.font())
+        state = self._compute_plot_state(records)
+        if state is None:
+            self._plot_state = None
+            painter.end()
+            return
+        self._plot_state = state
+        plot_left = state["plot_left"]
+        plot_right = state["plot_right"]
+        plot_top = state["plot_top"]
+        plot_bottom = state["plot_bottom"]
+        plot_width = state["plot_width"]
+        plot_height = state["plot_height"]
+        xmin = state["xmin"]
+        xmax = state["xmax"]
+        ymin = state["ymin"]
+        ymax = state["ymax"]
+
+        grid_pen = QPen(QColor(58, 58, 61))
+        grid_pen.setWidth(1)
+        axis_pen = QPen(QColor(172, 172, 178))
+        axis_pen.setWidth(1)
+        text_color = QColor(230, 230, 235)
+
+        painter.setPen(grid_pen)
+        ticks = 4
+        for i in range(ticks + 1):
+            y = plot_top + (plot_height * i / ticks)
+            painter.drawLine(plot_left, int(y), plot_right, int(y))
+            value = ymax - (ymax - ymin) * i / ticks
+            label = f"{value:.2f}"
+            painter.setPen(text_color)
+            painter.drawText(rect.left() + 4, int(y + fm.ascent() / 2), label)
+            painter.setPen(grid_pen)
+
+        for i in range(ticks + 1):
+            x = plot_left + (plot_width * i / ticks)
+            painter.drawLine(int(x), plot_top, int(x), plot_bottom)
+            value = xmin + (xmax - xmin) * i / ticks
+            label = f"{value:.0f}"
+            painter.setPen(text_color)
+            painter.drawText(int(x - fm.horizontalAdvance(label) / 2), plot_bottom + fm.height() + 6, label)
+            painter.setPen(grid_pen)
+
+        painter.setPen(axis_pen)
+        painter.drawLine(plot_left, plot_bottom, plot_right, plot_bottom)
+        painter.drawLine(plot_left, plot_top, plot_left, plot_bottom)
+
+        reference_specs = [
+            (-0.5, QColor(255, 159, 10, 150), 1),
+            (0.0, QColor(255, 255, 255, 210), 2),
+            (0.5, QColor(48, 209, 88, 150), 1),
+        ]
+        for value, color, width in reference_specs:
+            if ymin <= value <= ymax:
+                y = state["map_y"](value)
+                ref_pen = QPen(color)
+                ref_pen.setWidth(width)
+                painter.setPen(ref_pen)
+                painter.drawLine(plot_left, int(y), plot_right, int(y))
+                label = f"{value:.1f}"
+                painter.drawText(plot_right - fm.horizontalAdvance(label) - 4, int(y - 4), label)
+
+        path = QPainterPath()
+        first = state["records"][0]
+        path.moveTo(first["px"], first["py"])
+        for record in state["records"][1:]:
+            path.lineTo(record["px"], record["py"])
+
+        line_pen = QPen(QColor("#2997ff"))
+        line_pen.setWidth(2)
+        painter.setPen(line_pen)
+        painter.drawPath(path)
+        self._draw_drag_range(painter)
+
+        painter.setPen(text_color)
+        painter.drawText(plot_left, rect.top() + fm.ascent() + 4, self._metric_label)
+        x_label = "Residue ID"
+        painter.drawText(
+            int(plot_left + plot_width / 2 - fm.horizontalAdvance(x_label) / 2),
+            rect.bottom() - 8,
+            x_label,
+        )
+        painter.end()
+
+
 class CollapsibleSection(QWidget):
     def __init__(self, title: str, parent=None, expanded: bool = False):
         super().__init__(parent)
@@ -190,11 +540,37 @@ class DAQTool(ToolInstance):
         path, _ = QFileDialog.getOpenFileName(self.tool_window.ui_area, title, "")
         if path:
             line_edit.setText(path)
+        self._raise_tool_window_after_dialog()
 
     def _browse_save_file(self, line_edit, title="Save file"):
         path, _ = QFileDialog.getSaveFileName(self.tool_window.ui_area, title, "")
         if path:
             line_edit.setText(path)
+        self._raise_tool_window_after_dialog()
+
+    def _raise_tool_window_after_dialog(self):
+        """
+        File dialogs can return focus to the ChimeraX main window on macOS.
+        Queue activation after the native dialog has fully closed.
+        """
+        QTimer.singleShot(0, self._raise_tool_window)
+        QTimer.singleShot(100, self._raise_tool_window)
+
+    def _raise_tool_window(self):
+        widget = getattr(self.tool_window, "ui_area", None)
+        if widget is None:
+            return
+        try:
+            window = widget.window()
+        except Exception:
+            window = widget
+        try:
+            if window.isMinimized():
+                window.showNormal()
+            window.raise_()
+            window.activateWindow()
+        except Exception:
+            pass
     
 
     def _refresh_models(self):
@@ -964,9 +1340,16 @@ class DAQTool(ToolInstance):
         table_layout.setContentsMargins(sp(12), sp(10), sp(12), sp(12))
         table_layout.setSpacing(sp(8))
 
+        plot_tab = QWidget(root)
+        plot_tab.setProperty("section", "dark")
+        plot_layout = QVBoxLayout(plot_tab)
+        plot_layout.setContentsMargins(sp(12), sp(10), sp(12), sp(12))
+        plot_layout.setSpacing(sp(8))
+
         self.tabs.addTab(main_tab, "MAIN")
         self.tabs.addTab(params_tab, "Parameters")
         self._table_tab_index = self.tabs.addTab(table_tab, "Residue Table")
+        self._plot_tab_index = self.tabs.addTab(plot_tab, "Plot")
 
         # ---- Main tab: inputs ----
         input_grid = QGridLayout()
@@ -1529,6 +1912,41 @@ class DAQTool(ToolInstance):
         self.residue_table.clicked.connect(self._focus_clicked_residue)
         table_layout.addWidget(self.residue_table, 1)
 
+        plot_header = QLabel("Per-Residue DAQ Plot", root)
+        plot_header.setProperty("role", "title")
+        plot_layout.addWidget(plot_header)
+
+        plot_control_row = QHBoxLayout()
+        plot_control_row.setContentsMargins(0, 0, 0, 0)
+        plot_control_row.setSpacing(sp(8))
+
+        chain_label = QLabel("Chain", root)
+        chain_label.setToolTip("Select the chain to display in the residue score plot")
+        plot_control_row.addWidget(chain_label, 0, Qt.AlignVCenter)
+
+        self.plot_chain_combo = QComboBox(root)
+        self.plot_chain_combo.setToolTip("Only the selected chain is shown in the plot")
+        self.plot_chain_combo.currentIndexChanged.connect(self._on_plot_chain_changed)
+        plot_control_row.addWidget(self.plot_chain_combo, 0)
+
+        self.plot_status_label = QLabel("Open this tab to plot the current DAQ score table.", root)
+        self.plot_status_label.setProperty("role", "caption")
+        plot_control_row.addWidget(self.plot_status_label, 1)
+
+        self.plot_refresh_button = QPushButton("Refresh", root)
+        self.plot_refresh_button.setProperty("variant", "secondary-gray")
+        self.plot_refresh_button.setToolTip("Rebuild residue scores and redraw the plot")
+        self.plot_refresh_button.clicked.connect(self._refresh_residue_plot)
+        self.plot_refresh_button.style().unpolish(self.plot_refresh_button)
+        self.plot_refresh_button.style().polish(self.plot_refresh_button)
+        plot_control_row.addWidget(self.plot_refresh_button, 0, Qt.AlignRight)
+
+        plot_layout.addLayout(plot_control_row)
+
+        self.residue_plot = ResiduePlotWidget(root)
+        self.residue_plot.set_range_selected_callback(self._select_plot_residue_range)
+        plot_layout.addWidget(self.residue_plot, 1)
+
         # ---- Footer help link ----
         manual_url = "https://cxtoolshed.rbvi.ucsf.edu/apps/chimeraxdaqplugin"
         footer_row = QHBoxLayout()
@@ -1611,6 +2029,8 @@ class DAQTool(ToolInstance):
     def _on_tab_changed(self, index):
         if index == getattr(self, "_table_tab_index", -1):
             self._update_residue_table()
+        elif index == getattr(self, "_plot_tab_index", -1):
+            self._update_residue_plot()
 
     def _refresh_residue_table(self):
         self._update_residue_table(force=True)
@@ -1638,21 +2058,36 @@ class DAQTool(ToolInstance):
     def _build_table_rows(self, structure, residues, scores):
         rows = []
         for residue, score in zip(residues, scores):
-            score_text = "NaN" if score != score else f"{float(score):.4f}"
+            chain_id = getattr(residue, "chain_id", "") or ""
+            residue_label = self._format_residue_id(residue)
+            residue_number = getattr(residue, "number", None)
+            try:
+                residue_number = int(residue_number)
+            except Exception:
+                residue_number = None
+            try:
+                score_value = float(score)
+            except Exception:
+                score_value = float("nan")
+            score_text = "NaN" if not math.isfinite(score_value) else f"{score_value:.4f}"
             rows.append({
                 "display": (
-                    getattr(residue, "chain_id", "") or "",
-                    self._format_residue_id(residue),
+                    chain_id,
+                    residue_label,
                     (getattr(residue, "name", "") or "").upper(),
                     score_text,
                 ),
                 "sort": (
-                    getattr(residue, "chain_id", "") or "",
+                    chain_id,
                     self._residue_sort_key(residue),
                     (getattr(residue, "name", "") or "").upper(),
-                    float(score) if score == score else float("-inf"),
+                    score_value if math.isfinite(score_value) else float("-inf"),
                 ),
                 "residue_spec": self._residue_spec(structure, residue),
+                "chain_id": chain_id,
+                "residue_label": residue_label,
+                "residue_number": residue_number,
+                "score": score_value,
             })
         return rows
 
@@ -1708,6 +2143,41 @@ class DAQTool(ToolInstance):
             return None
         return cache
 
+    def _residue_score_cache_or_error(self, force: bool = False):
+        structure = self._selected_structure()
+        if structure is None:
+            return None, "Select a structure to view per-residue DAQ scores."
+
+        npy = self.load_edit.text().strip()
+        if not npy:
+            return None, "Set Load NPY to populate residue scores."
+
+        cache = None if force else self._get_cached_residue_table_data()
+        if cache is not None:
+            return cache, None
+
+        try:
+            score_data = _compute_residue_scores(
+                self.session,
+                structure,
+                npy,
+                int(self.k_spin.value()),
+                self._selected_metric(),
+                atom_name="CA",
+                radius=3.0,
+                halfwindow=int(self.hw_spin.value()),
+                run_dssp=True,
+            )
+        except Exception as e:
+            self.session.logger.error(f"Failed to build residue score table: {e}")
+            return None, f"Failed to load residue scores: {e}"
+
+        if score_data is None:
+            return None, "No residues were found in the selected structure."
+
+        self._store_residue_table_cache(score_data["residues"], score_data["scores"], source="computed")
+        return self._residue_table_cache, None
+
     def _focus_clicked_residue(self, index):
         structure = self._selected_structure()
         if structure is None:
@@ -1732,55 +2202,16 @@ class DAQTool(ToolInstance):
         self.residue_table.setSortingEnabled(False)
         self.residue_table_model.clear()
 
-        structure = self._selected_structure()
-        if structure is None:
-            self._set_table_status("Select a structure to view per-residue DAQ scores.")
-            self.residue_table.setUpdatesEnabled(True)
-            self.residue_table.setSortingEnabled(True)
-            return
-
         npy = self.load_edit.text().strip()
-        if not npy:
-            self._set_table_status("Set Load NPY to populate the residue table.")
+        cache, error = self._residue_score_cache_or_error(force=force)
+        if error is not None:
+            self._set_table_status(error)
             self.residue_table.setUpdatesEnabled(True)
             self.residue_table.setSortingEnabled(True)
             return
 
-        cache = None if force else self._get_cached_residue_table_data()
-        if cache is not None:
-            rows = cache["rows"]
-            cache_source = cache.get("source", "cache")
-        else:
-            try:
-                score_data = _compute_residue_scores(
-                    self.session,
-                    structure,
-                    npy,
-                    int(self.k_spin.value()),
-                    self._selected_metric(),
-                    atom_name="CA",
-                    radius=3.0,
-                    halfwindow=int(self.hw_spin.value()),
-                    run_dssp=True,
-                )
-            except Exception as e:
-                self._set_table_status(f"Failed to load residue scores: {e}")
-                self.session.logger.error(f"Failed to build residue score table: {e}")
-                self.residue_table.setUpdatesEnabled(True)
-                self.residue_table.setSortingEnabled(True)
-                return
-
-            if score_data is None:
-                self._set_table_status("No residues were found in the selected structure.")
-                self.residue_table.setUpdatesEnabled(True)
-                self.residue_table.setSortingEnabled(True)
-                return
-
-            residues = score_data["residues"]
-            scores = score_data["scores"]
-            cache_source = "computed"
-            self._store_residue_table_cache(residues, scores, source=cache_source)
-            rows = self._residue_table_cache["rows"]
+        rows = cache["rows"]
+        cache_source = cache.get("source", "cache")
 
         self._set_table_status(
             f"Loaded {len(rows)} residues using {self.metric_combo.currentText()} from {os.path.basename(npy)} ({cache_source})."
@@ -1791,6 +2222,143 @@ class DAQTool(ToolInstance):
         sort_section = self.residue_table.horizontalHeader().sortIndicatorSection()
         sort_order = self.residue_table.horizontalHeader().sortIndicatorOrder()
         self.residue_table.sortByColumn(sort_section, sort_order)
+        if self.tabs.currentIndex() == getattr(self, "_plot_tab_index", -1):
+            self._update_residue_plot_from_cache(cache)
+
+    def _set_plot_status(self, text: str):
+        self.plot_status_label.setText(text)
+
+    def _chain_display_name(self, chain_id):
+        return str(chain_id) if str(chain_id) else "(blank)"
+
+    def _chain_ids_for_plot(self, rows):
+        chain_ids = []
+        seen = set()
+        for row in sorted(rows, key=lambda r: (str(r.get("chain_id", "")), r.get("sort", ("", (0, "")))[1])):
+            chain_id = row.get("chain_id", "")
+            if chain_id in seen:
+                continue
+            seen.add(chain_id)
+            chain_ids.append(chain_id)
+        return chain_ids
+
+    def _sync_plot_chain_combo(self, rows):
+        current = self.plot_chain_combo.currentData()
+        chain_ids = self._chain_ids_for_plot(rows)
+
+        self.plot_chain_combo.blockSignals(True)
+        try:
+            self.plot_chain_combo.clear()
+            for chain_id in chain_ids:
+                self.plot_chain_combo.addItem(self._chain_display_name(chain_id), chain_id)
+            if chain_ids:
+                index = chain_ids.index(current) if current in chain_ids else 0
+                self.plot_chain_combo.setCurrentIndex(index)
+        finally:
+            self.plot_chain_combo.blockSignals(False)
+
+        return self.plot_chain_combo.currentData() if chain_ids else None
+
+    def _selected_plot_chain(self):
+        return self.plot_chain_combo.currentData()
+
+    def _on_plot_chain_changed(self, _index):
+        cache = self._get_cached_residue_table_data()
+        if cache is not None:
+            self._update_residue_plot_from_cache(cache)
+
+    def _refresh_residue_plot(self):
+        self._update_residue_plot(force=True)
+
+    def _update_residue_plot(self, force: bool = False):
+        cache, error = self._residue_score_cache_or_error(force=force)
+        if error is not None:
+            self._set_plot_status(error)
+            self.plot_chain_combo.blockSignals(True)
+            try:
+                self.plot_chain_combo.clear()
+            finally:
+                self.plot_chain_combo.blockSignals(False)
+            self.residue_plot.set_message(error)
+            return
+        self._update_residue_plot_from_cache(cache)
+
+    def _update_residue_plot_from_cache(self, cache):
+        rows = cache.get("rows", []) if cache else []
+        npy = self.load_edit.text().strip()
+        if not rows:
+            message = "No residues were found in the selected structure."
+            self._set_plot_status(message)
+            self.plot_chain_combo.blockSignals(True)
+            try:
+                self.plot_chain_combo.clear()
+            finally:
+                self.plot_chain_combo.blockSignals(False)
+            self.residue_plot.set_message(message)
+            return
+
+        chain_id = self._sync_plot_chain_combo(rows)
+        if chain_id is None:
+            message = "No chains were found in the residue score table."
+            self._set_plot_status(message)
+            self.residue_plot.set_message(message)
+            return
+
+        count = sum(1 for row in rows if row.get("chain_id") == chain_id)
+        cache_source = cache.get("source", "cache")
+        self._set_plot_status(
+            f"Showing chain {self._chain_display_name(chain_id)} ({count} residues) using {self.metric_combo.currentText()} from {os.path.basename(npy)} ({cache_source})."
+        )
+        self.residue_plot.set_data(rows, chain_id, self.metric_combo.currentText())
+
+    def _select_plot_residue_range(self, chain_id, residue_min, residue_max):
+        cache = self._get_cached_residue_table_data()
+        if cache is None:
+            return
+
+        low = math.floor(min(residue_min, residue_max))
+        high = math.ceil(max(residue_min, residue_max))
+        rows = []
+        for row in cache.get("rows", []):
+            if row.get("chain_id") != chain_id:
+                continue
+            residue_number = row.get("residue_number")
+            score = row.get("score")
+            if residue_number is None or score is None:
+                continue
+            if not math.isfinite(float(score)):
+                continue
+            if low <= int(residue_number) <= high:
+                rows.append(row)
+
+        rows.sort(key=lambda row: (int(row.get("residue_number", 0)), row.get("residue_label", "")))
+        residue_specs = []
+        seen = set()
+        for row in rows:
+            spec = row.get("residue_spec")
+            if not spec or spec in seen:
+                continue
+            seen.add(spec)
+            residue_specs.append(spec)
+
+        if not residue_specs:
+            self._set_plot_status(
+                f"No finite residues in chain {self._chain_display_name(chain_id)} for residue range {low}-{high}."
+            )
+            return
+
+        try:
+            run(self.session, "select clear", log=False)
+            run(self.session, "select " + " ".join(residue_specs), log=False)
+            self.session.logger.status(
+                f"Selected {len(residue_specs)} residues from chain {self._chain_display_name(chain_id)} ({low}-{high}).",
+                color="blue",
+            )
+            self._set_plot_status(
+                f"Selected {len(residue_specs)} residues in chain {self._chain_display_name(chain_id)} for residue range {low}-{high}."
+            )
+        except Exception as e:
+            self.session.logger.error(f"Failed to select plot residue range {low}-{high}: {e}")
 
     # ---------------- Command runners ----------------
     def _run_compute_grid(self):
@@ -1892,8 +2460,8 @@ class DAQTool(ToolInstance):
             run(self.session, cmd)
         except Exception:
             return
-        self._capture_scores_from_structure_bfactors(self._selected_structure())
         self.load_edit.setText(outp)
+        self._capture_scores_from_structure_bfactors(self._selected_structure())
 
     def _run_color_apply(self):
         st_tok = self._structure_token_or_none()

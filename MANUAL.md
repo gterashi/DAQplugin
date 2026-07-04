@@ -157,6 +157,10 @@ Start the GUI from **Tools > Validation > DAQplugin**.
 
 This tab shows chain ID, residue ID, amino-acid name, and window-averaged DAQ score for the current structure and `.npy` file. Click **Refresh** to recompute the table. Click a residue row to select, center, and zoom to that residue in ChimeraX.
 
+### Per-Residue DAQ Plot tab
+
+This tab plots residue ID on the x-axis and DAQ score on the y-axis using the same data as the residue table. Click **Refresh** to recompute the scores. If the structure has multiple chains, choose a chain from the **Chain** dropdown; only the selected chain is shown in the plot. Hover over the line to show the nearest residue ID. Drag across a residue range in the plot to select those residues in ChimeraX.
+
 ## Command Reference
 
 ### `daqscore compute_grid`
@@ -356,7 +360,7 @@ This is residue-number based, so missing residue numbers are skipped naturally. 
 2. Set the map contour.
 3. Run `daqscore compute_grid`, or click **Calculate DAQ Scores** in the GUI.
 4. Color with `aa_score`.
-5. Inspect the per-residue table and suspicious regions.
+5. Inspect the per-residue table or plot and suspicious regions.
 
 ### Coloring only from a precomputed `.npy`
 
