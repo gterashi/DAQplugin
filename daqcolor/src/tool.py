@@ -130,6 +130,7 @@ class ResiduePlotWidget(QWidget):
         self._drag_current_x = None
         self._range_selected_callback = None
         self._last_hover_label = None
+        self._selected_residue_range = None
         self.setMinimumHeight(260)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -146,6 +147,7 @@ class ResiduePlotWidget(QWidget):
         self._drag_start_x = None
         self._drag_current_x = None
         self._last_hover_label = None
+        self._selected_residue_range = None
         self.update()
 
     def set_message(self, message):
@@ -156,6 +158,15 @@ class ResiduePlotWidget(QWidget):
         self._drag_start_x = None
         self._drag_current_x = None
         self._last_hover_label = None
+        self._selected_residue_range = None
+        self.update()
+
+    def set_selected_residue_range(self, low, high):
+        self._selected_residue_range = (min(int(low), int(high)), max(int(low), int(high)))
+        self.update()
+
+    def clear_selected_residue_range(self):
+        self._selected_residue_range = None
         self.update()
 
     def _plot_records(self):
@@ -307,6 +318,32 @@ class ResiduePlotWidget(QWidget):
         painter.drawLine(int(x1), int(state["plot_top"]), int(x1), int(state["plot_bottom"]))
         painter.drawLine(int(x2), int(state["plot_top"]), int(x2), int(state["plot_bottom"]))
 
+    def _draw_selected_range(self, painter):
+        state = self._plot_state
+        if state is None or self._selected_residue_range is None:
+            return
+
+        low, high = self._selected_residue_range
+        x1 = state["map_x"](low - 0.5)
+        x2 = state["map_x"](high + 0.5)
+        x1 = min(max(x1, state["plot_left"]), state["plot_right"])
+        x2 = min(max(x2, state["plot_left"]), state["plot_right"])
+        if abs(x2 - x1) < 2:
+            return
+
+        painter.fillRect(
+            int(x1),
+            int(state["plot_top"]),
+            int(x2 - x1),
+            int(state["plot_bottom"] - state["plot_top"]),
+            QColor(255, 204, 64, 44),
+        )
+        edge_pen = QPen(QColor(255, 214, 102, 170))
+        edge_pen.setWidth(1)
+        painter.setPen(edge_pen)
+        painter.drawLine(int(x1), int(state["plot_top"]), int(x1), int(state["plot_bottom"]))
+        painter.drawLine(int(x2), int(state["plot_top"]), int(x2), int(state["plot_bottom"]))
+
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
@@ -443,6 +480,8 @@ class ResiduePlotWidget(QWidget):
                 painter.drawLine(plot_left, int(y), plot_right, int(y))
                 label = f"{value:.1f}"
                 painter.drawText(plot_right - fm.horizontalAdvance(label) - 4, int(y - 4), label)
+
+        self._draw_selected_range(painter)
 
         path = QPainterPath()
         first = state["records"][0]
@@ -1952,7 +1991,7 @@ class DAQTool(ToolInstance):
 
         self.plot_zoom_in_button = QPushButton("Zoom In", root)
         self.plot_zoom_in_button.setProperty("variant", "secondary-gray")
-        self.plot_zoom_in_button.setToolTip("Zoom the ChimeraX structure view to the residue range last selected by dragging")
+        self.plot_zoom_in_button.setToolTip("Frame the last dragged residue range using ChimeraX View Selected behavior")
         self.plot_zoom_in_button.clicked.connect(self._zoom_structure_to_plot_selection)
         self.plot_zoom_in_button.style().unpolish(self.plot_zoom_in_button)
         self.plot_zoom_in_button.style().polish(self.plot_zoom_in_button)
@@ -2311,10 +2350,11 @@ class DAQTool(ToolInstance):
 
         try:
             residue_spec = " ".join(self._plot_selected_residue_specs)
-            run(self.session, f"view {residue_spec}", log=False)
-            run(self.session, "zoom 0.5", log=False)
+            run(self.session, "select clear", log=False)
+            run(self.session, f"select {residue_spec}", log=False)
+            run(self.session, "view sel", log=False)
             low, high = self._plot_selected_range or ("?", "?")
-            message = f"Zoomed ChimeraX view to selected residue range {low}-{high}."
+            message = f"Viewed selected residue range {low}-{high}."
             self.session.logger.status(message, color="blue")
             self._set_plot_status(message)
         except Exception as e:
@@ -2351,6 +2391,7 @@ class DAQTool(ToolInstance):
     def _update_residue_plot_from_cache(self, cache):
         self._plot_selected_residue_specs = []
         self._plot_selected_range = None
+        self.residue_plot.clear_selected_residue_range()
         rows = cache.get("rows", []) if cache else []
         npy = self.load_edit.text().strip()
         if not rows:
@@ -2411,6 +2452,7 @@ class DAQTool(ToolInstance):
         if not residue_specs:
             self._plot_selected_residue_specs = []
             self._plot_selected_range = None
+            self.residue_plot.clear_selected_residue_range()
             self._set_plot_status(
                 f"No finite residues in chain {self._chain_display_name(chain_id)} for residue range {low}-{high}."
             )
@@ -2421,6 +2463,7 @@ class DAQTool(ToolInstance):
             run(self.session, "select " + " ".join(residue_specs), log=False)
             self._plot_selected_residue_specs = residue_specs
             self._plot_selected_range = (low, high)
+            self.residue_plot.set_selected_residue_range(low, high)
             self.session.logger.status(
                 f"Selected {len(residue_specs)} residues from chain {self._chain_display_name(chain_id)} ({low}-{high}).",
                 color="blue",
@@ -2436,6 +2479,7 @@ class DAQTool(ToolInstance):
             run(self.session, "select clear", log=False)
             self._plot_selected_residue_specs = []
             self._plot_selected_range = None
+            self.residue_plot.clear_selected_residue_range()
             self.session.logger.status("Cleared selection.", color="blue")
             self._set_plot_status("Cleared ChimeraX selection.")
         except Exception as e:
