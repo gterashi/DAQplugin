@@ -510,6 +510,8 @@ class DAQTool(ToolInstance):
         self.display_name = "DAQplugin"
         self._residue_table_cache = None
         self._computed_grid_npy_path = None
+        self._plot_selected_residue_specs = []
+        self._plot_selected_range = None
         
         self.tool_window = MainToolWindow(self, close_destroys=True)
 
@@ -1941,15 +1943,38 @@ class DAQTool(ToolInstance):
         self.plot_refresh_button.style().polish(self.plot_refresh_button)
         plot_control_row.addWidget(self.plot_refresh_button, 0, Qt.AlignRight)
 
+        plot_layout.addLayout(plot_control_row)
+
+        plot_action_row = QHBoxLayout()
+        plot_action_row.setContentsMargins(0, 0, 0, 0)
+        plot_action_row.setSpacing(sp(8))
+        plot_action_row.addStretch(1)
+
+        self.plot_zoom_in_button = QPushButton("Zoom In", root)
+        self.plot_zoom_in_button.setProperty("variant", "secondary-gray")
+        self.plot_zoom_in_button.setToolTip("Zoom the ChimeraX structure view to the residue range last selected by dragging")
+        self.plot_zoom_in_button.clicked.connect(self._zoom_structure_to_plot_selection)
+        self.plot_zoom_in_button.style().unpolish(self.plot_zoom_in_button)
+        self.plot_zoom_in_button.style().polish(self.plot_zoom_in_button)
+        plot_action_row.addWidget(self.plot_zoom_in_button, 0, Qt.AlignRight)
+
+        self.plot_zoom_out_button = QPushButton("Zoom Out", root)
+        self.plot_zoom_out_button.setProperty("variant", "secondary-gray")
+        self.plot_zoom_out_button.setToolTip("Show the full selected structure in the ChimeraX view")
+        self.plot_zoom_out_button.clicked.connect(self._zoom_structure_out)
+        self.plot_zoom_out_button.style().unpolish(self.plot_zoom_out_button)
+        self.plot_zoom_out_button.style().polish(self.plot_zoom_out_button)
+        plot_action_row.addWidget(self.plot_zoom_out_button, 0, Qt.AlignRight)
+
         self.plot_clear_selection_button = QPushButton("Clear Selection", root)
         self.plot_clear_selection_button.setProperty("variant", "secondary-gray")
         self.plot_clear_selection_button.setToolTip("Clear the current ChimeraX selection")
         self.plot_clear_selection_button.clicked.connect(self._clear_plot_selection)
         self.plot_clear_selection_button.style().unpolish(self.plot_clear_selection_button)
         self.plot_clear_selection_button.style().polish(self.plot_clear_selection_button)
-        plot_control_row.addWidget(self.plot_clear_selection_button, 0, Qt.AlignRight)
+        plot_action_row.addWidget(self.plot_clear_selection_button, 0, Qt.AlignRight)
 
-        plot_layout.addLayout(plot_control_row)
+        plot_layout.addLayout(plot_action_row)
 
         self.residue_plot = ResiduePlotWidget(root)
         self.residue_plot.set_range_selected_callback(self._select_plot_residue_range)
@@ -2278,6 +2303,38 @@ class DAQTool(ToolInstance):
     def _refresh_residue_plot(self):
         self._update_residue_plot(force=True)
 
+    def _zoom_structure_to_plot_selection(self):
+        if not self._plot_selected_residue_specs:
+            message = "Drag across a residue range in the plot before zooming in."
+            self._set_plot_status(message)
+            return
+
+        try:
+            residue_spec = " ".join(self._plot_selected_residue_specs)
+            run(self.session, f"view {residue_spec}", log=False)
+            run(self.session, "zoom 0.5", log=False)
+            low, high = self._plot_selected_range or ("?", "?")
+            message = f"Zoomed ChimeraX view to selected residue range {low}-{high}."
+            self.session.logger.status(message, color="blue")
+            self._set_plot_status(message)
+        except Exception as e:
+            self.session.logger.error(f"Failed to zoom to plot selection: {e}")
+
+    def _zoom_structure_out(self):
+        structure = self._selected_structure()
+        if structure is None:
+            message = "Select a Structure before zooming out."
+            self._set_plot_status(message)
+            return
+
+        try:
+            run(self.session, f"view #{structure.id_string}", log=False)
+            message = f"Showing full structure #{structure.id_string} in ChimeraX view."
+            self.session.logger.status(message, color="blue")
+            self._set_plot_status(message)
+        except Exception as e:
+            self.session.logger.error(f"Failed to zoom out to full structure: {e}")
+
     def _update_residue_plot(self, force: bool = False):
         cache, error = self._residue_score_cache_or_error(force=force)
         if error is not None:
@@ -2292,6 +2349,8 @@ class DAQTool(ToolInstance):
         self._update_residue_plot_from_cache(cache)
 
     def _update_residue_plot_from_cache(self, cache):
+        self._plot_selected_residue_specs = []
+        self._plot_selected_range = None
         rows = cache.get("rows", []) if cache else []
         npy = self.load_edit.text().strip()
         if not rows:
@@ -2350,6 +2409,8 @@ class DAQTool(ToolInstance):
             residue_specs.append(spec)
 
         if not residue_specs:
+            self._plot_selected_residue_specs = []
+            self._plot_selected_range = None
             self._set_plot_status(
                 f"No finite residues in chain {self._chain_display_name(chain_id)} for residue range {low}-{high}."
             )
@@ -2358,6 +2419,8 @@ class DAQTool(ToolInstance):
         try:
             run(self.session, "select clear", log=False)
             run(self.session, "select " + " ".join(residue_specs), log=False)
+            self._plot_selected_residue_specs = residue_specs
+            self._plot_selected_range = (low, high)
             self.session.logger.status(
                 f"Selected {len(residue_specs)} residues from chain {self._chain_display_name(chain_id)} ({low}-{high}).",
                 color="blue",
@@ -2371,6 +2434,8 @@ class DAQTool(ToolInstance):
     def _clear_plot_selection(self):
         try:
             run(self.session, "select clear", log=False)
+            self._plot_selected_residue_specs = []
+            self._plot_selected_range = None
             self.session.logger.status("Cleared selection.", color="blue")
             self._set_plot_status("Cleared ChimeraX selection.")
         except Exception as e:
