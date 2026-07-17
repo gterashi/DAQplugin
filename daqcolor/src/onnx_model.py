@@ -381,14 +381,37 @@ def _preload_cuda_libraries(verbose: bool = False):
         # cuBLAS and cuBLASLt
         'libcublasLt.so*',
         'libcublas.so*',
-        # cuDNN component libraries (must be loaded before main libcudnn.so)
+        # cuDNN component libraries (must be loaded before main libcudnn.so).
+        # cuDNN 9 RENAMED and re-split these from cuDNN 8: the old
+        # libcudnn_{ops,cnn,adv}_{infer,train}.so.8 became libcudnn_ops.so.9,
+        # libcudnn_cnn.so.9, libcudnn_adv.so.9, libcudnn_graph.so.9, plus new
+        # engines_*/heuristic/ext sublibs. The main libcudnn.so.9 is a thin
+        # dispatcher that pulls these in; when the loader finds a stale/system
+        # libcudnn.so.9 whose $ORIGIN lacks the sublibs (or ORT probes providers
+        # before this preload runs), it fails with
+        # "libcudnn_adv.so.9: cannot open shared object file". Preloading each
+        # sublib by absolute path with RTLD_GLOBAL from the pip nvidia dir
+        # inoculates the process regardless. Both cuDNN 8 and 9 names are listed
+        # so the plugin keeps working across a cuDNN major bump; missing patterns
+        # simply glob to nothing.
+        #   cuDNN 9 (current pin: nvidia-cudnn-cu12 >=9):
+        'libcudnn_graph.so*',
+        'libcudnn_engines_precompiled.so*',
+        'libcudnn_engines_runtime_compiled.so*',
+        'libcudnn_engines_tensor_ir.so*',
+        'libcudnn_heuristic.so*',
+        'libcudnn_ops.so*',
+        'libcudnn_cnn.so*',
+        'libcudnn_adv.so*',
+        'libcudnn_ext.so*',
+        #   cuDNN 8 (legacy; harmless no-ops on cuDNN 9):
         'libcudnn_ops_infer.so*',
         'libcudnn_ops_train.so*',
         'libcudnn_cnn_infer.so*',
         'libcudnn_cnn_train.so*',
         'libcudnn_adv_infer.so*',
         'libcudnn_adv_train.so*',
-        # Main cuDNN library (depends on component libraries above)
+        # Main cuDNN library (dispatcher; depends on component libraries above)
         'libcudnn.so*',
         # Other libraries
         'libcufft.so*',
@@ -442,6 +465,81 @@ def _preload_cuda_libraries(verbose: bool = False):
     # Always return success - if preloading fails, system CUDA might still work
     _cuda_preload_success = True
     return True
+
+
+_cuda_device_probe = None
+
+
+def _cuda_device_available(verbose: bool = False) -> bool:
+    """True only if a CUDA device is actually USABLE on this Linux host.
+
+    "Usable" = the CUDA runtime (libcudart) loads AND ``cudaGetDeviceCount``
+    reports >= 1 visible device. This is stricter than
+    ``ort.get_available_providers()`` (which lists Tensorrt/CUDA EPs whenever an
+    onnxruntime-gpu build is installed, regardless of whether any GPU or CUDA
+    runtime is present).
+
+    Used to prune the GPU candidates from the ``auto`` chain on:
+      * CPU-only Linux hosts (no NVIDIA wheels resolvable / no libcudart),
+      * hosts with the nvidia wheels but no GPU (libcudart loads, 0 devices),
+      * hosts whose driver is too old for this CUDA major (coyote: driver 470
+        vs CUDA 12 -> cudaGetDeviceCount returns an error, treated as no device).
+
+    Without this the auto chain would try tensorrt then cuda first, each dlopen
+    spraying "libcudart.so.* : cannot open shared object file" provider-load
+    errors before landing on CPU -- and a half-broken GPU stack can crash the
+    process mid-attempt (e.g. cuDNN dispatch aborting) before CPU is ever
+    reached. Result is cached (device topology is fixed for the process).
+
+    Non-Linux returns True (macOS MLX / Windows DirectML paths handle their own
+    device probing); forced GPU backends bypass this entirely so an explicit
+    user choice still surfaces the specific EP error.
+    """
+    global _cuda_device_probe
+    if _cuda_device_probe is not None:
+        return _cuda_device_probe
+    if PLATFORM != 'linux':
+        _cuda_device_probe = True
+        return True
+
+    result = False
+    try:
+        import ctypes
+        import glob
+        # Only libcudart is needed to count devices — don't preload the whole
+        # GPU stack here (that happens in DAQOnnxModel once a GPU backend is
+        # actually chosen). Look on the loader path first, then the pip dirs.
+        candidates = ["libcudart.so.12", "libcudart.so"]
+        for p in _get_cuda_library_paths():
+            candidates += sorted(glob.glob(os.path.join(p, "libcudart.so*")),
+                                 key=len, reverse=True)
+        libcudart = None
+        for name in candidates:
+            try:
+                libcudart = ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)
+                break
+            except OSError:
+                continue
+        if libcudart is not None:
+            count = ctypes.c_int(0)
+            # cudaGetDeviceCount needs the NVIDIA driver, not just the runtime
+            # libs. rc==0 (cudaSuccess) with count>0 means a device is usable;
+            # any error (no driver, driver too old for this CUDA major) -> 0.
+            try:
+                rc = libcudart.cudaGetDeviceCount(ctypes.byref(count))
+                result = (rc == 0 and count.value > 0)
+            except Exception:
+                result = False
+        if verbose:
+            print(f"DAQ: CUDA device probe -> "
+                  f"{'usable' if result else 'no usable GPU (CPU only)'}")
+    except Exception as exc:
+        if verbose:
+            print(f"DAQ: CUDA device probe failed ({exc!r}); assuming CPU only")
+        result = False
+
+    _cuda_device_probe = result
+    return result
 
 
 def download_model(dest_path: Path, url: str = MODEL_URL) -> bool:
@@ -883,6 +981,21 @@ def load_model(model_path: Optional[str] = None, verbose: bool = False,
 
     # Walk auto chain or single forced backend. First success wins.
     chain = _auto_chain() if backend == "auto" else [backend]
+
+    # CPU-only / broken-GPU Linux fallback: for `auto`, drop the ORT GPU
+    # candidates when no CUDA device is actually usable, so we go straight to
+    # the CPU EP instead of dlopening the GPU providers (which spray
+    # "libcudart.so.* : cannot open" errors, and on a half-broken CUDA stack can
+    # crash the process before CPU is ever reached). Forced GPU backends skip
+    # this — an explicit choice should still surface its specific EP error.
+    if backend == "auto" and PLATFORM == "linux":
+        gpu_cands = [c for c in chain if c in ("tensorrt", "cuda")]
+        if gpu_cands and not _cuda_device_available(verbose=verbose):
+            chain = [c for c in chain if c not in ("tensorrt", "cuda")]
+            print("DAQ: no usable CUDA device (libcudart not loadable or no GPU "
+                  "visible) — skipping " + "/".join(gpu_cands)
+                  + ", using CPU.")
+
     errors = []
     for cand in chain:
         try:

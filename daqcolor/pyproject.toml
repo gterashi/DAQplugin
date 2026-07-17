@@ -8,7 +8,7 @@ build-backend = "chimerax.bundle_builder.cx_pep517"
 # When uploaded to the ChimeraX toolshed, the bundle
 # will be displayed without the ChimeraX- prefix.
 name = "ChimeraX-DAQplugin"
-version = "1.0.5"
+version = "1.0.6"
 license = "GPL-3.0-only"
 authors = [{name = "Genki Terashi", email = "gterashi@purdue.edu"}]
 description = "DAQ Score computation and visualization for cryo-EM models"
@@ -34,8 +34,20 @@ dependencies = [
     "scipy >=1.7.0",
     "mrcfile >=1.4.0",
     "numba >=0.52.0",
-    # ONNX Runtime: exactly one variant per OS
-    "onnxruntime-gpu >=1.19.0; sys_platform == 'linux'",
+    # ONNX Runtime: exactly one variant per OS.
+    # Linux is CAPPED below 1.27: onnxruntime-gpu 1.27.0 switched its PyPI wheel
+    # to CUDA 13 (its libs NEED libcudart.so.13 / libcublas.so.13, and its
+    # [cuda] extra pulls nvidia-*-cu13). Paired with the CUDA-12 nvidia wheels
+    # pinned below that mismatch makes `import onnxruntime` die with
+    # "libcudart.so.13: cannot open shared object file", and CUDA 13 also needs
+    # driver >=580 (many hosts have 525-570). Staying on the CUDA-12 line
+    # (<=1.26.x, driver >=525) keeps this bundle installable on the lab fleet.
+    # Revisit only as a coordinated cu13 upgrade (bump ORT + every nvidia-*-cu12
+    # -> -cu13 + TensorRT cu13 together). Blackwell (sm_100/120) support does NOT
+    # require CUDA 13 -- it comes from the CUDA >=12.8 nvidia wheels floored
+    # below, so this ceiling and that floor together give Blackwell + driver-525
+    # backward compat at once.
+    "onnxruntime-gpu >=1.19.0,<1.27; sys_platform == 'linux'",
     "onnxruntime-directml >=1.16.0; sys_platform == 'win32'",
     "onnxruntime >=1.16.0; sys_platform == 'darwin'",
     # Linux NVIDIA stack: TensorRT EP runs ~2.7x faster than the CUDA EP (and
@@ -50,9 +62,21 @@ dependencies = [
     # backend='auto' still gives GPU acceleration via the CUDA EP below.
     "tensorrt-cu12-libs @ https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "tensorrt-cu12-libs @ https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-10.13.0.35-py2.py3-none-manylinux_2_31_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "nvidia-cuda-runtime-cu12; sys_platform == 'linux'",
-    "nvidia-cudnn-cu12 >=9.0.0; sys_platform == 'linux'",
-    "nvidia-cublas-cu12; sys_platform == 'linux'",
+    # CUDA runtime + math libs. Floored at >=12.8 for BLACKWELL: CUDA 12.8 is
+    # the first toolkit that ships sm_100/sm_120 device code (cuBLAS Blackwell
+    # GEMM kernels; nvrtc/nvjitlink able to emit Blackwell SASS). The `-cu12`
+    # suffix pins the CUDA *major* to 12 (a CUDA-13 build would be `-cu13`), so
+    # the effective window is CUDA 12.8 <= x < 13 -- Blackwell-capable on the top
+    # end, driver >=525 (minor-version compat) on the bottom, no forced jump to
+    # CUDA 13 / driver >=580. Verified on RTX PRO 6000 Blackwell (sm_120): both
+    # CUDA and TensorRT EPs run inference.
+    "nvidia-cuda-runtime-cu12 >=12.8; sys_platform == 'linux'",
+    # cuDNN >=9.10 (first proven-on-Blackwell build here) and <10: ORT's CUDA-12
+    # build links libcudnn.so.9, so a hypothetical cuDNN 10 (libcudnn.so.10)
+    # would not satisfy it. 9.10-9.24 all verified; the sublib preload in
+    # onnx_model.py handles the cuDNN-9 component-library rename.
+    "nvidia-cudnn-cu12 >=9.10,<10; sys_platform == 'linux'",
+    "nvidia-cublas-cu12 >=12.8; sys_platform == 'linux'",
     "nvidia-cufft-cu12; sys_platform == 'linux'",
     "nvidia-curand-cu12; sys_platform == 'linux'",
     "nvidia-cusolver-cu12; sys_platform == 'linux'",
