@@ -471,29 +471,30 @@ _cuda_device_probe = None
 
 
 def _cuda_device_available(verbose: bool = False) -> bool:
-    """True only if a CUDA device is actually USABLE on this Linux host.
+    """True if an NVIDIA GPU with a loaded kernel driver is present (Linux).
 
-    "Usable" = the CUDA runtime (libcudart) loads AND ``cudaGetDeviceCount``
-    reports >= 1 visible device. This is stricter than
-    ``ort.get_available_providers()`` (which lists Tensorrt/CUDA EPs whenever an
-    onnxruntime-gpu build is installed, regardless of whether any GPU or CUDA
-    runtime is present).
+    Detection uses the ``/dev/nvidia*`` device nodes (and
+    ``/proc/driver/nvidia/gpus``), which exist iff the NVIDIA kernel driver is
+    loaded and a physical GPU is present. This is deliberately a *device
+    presence* check, NOT a CUDA-usability check:
 
-    Used to prune the GPU candidates from the ``auto`` chain on:
-      * CPU-only Linux hosts (no NVIDIA wheels resolvable / no libcudart),
-      * hosts with the nvidia wheels but no GPU (libcudart loads, 0 devices),
-      * hosts whose driver is too old for this CUDA major (coyote: driver 470
-        vs CUDA 12 -> cudaGetDeviceCount returns an error, treated as no device).
+      * It does NOT initialize CUDA (no ``cudaGetDeviceCount``) and does NOT
+        shell out to ``nvidia-smi``. Both of those can return a false negative
+        on a perfectly good GPU box -- e.g. ``cudaGetDeviceCount`` returning an
+        error under CUDA minor-version compat with a slightly older driver, or
+        ``nvidia-smi`` not being on ChimeraX's subprocess PATH -- which would
+        then wrongly force CPU on a GPU machine (regression seen in v1.0.6).
 
-    Without this the auto chain would try tensorrt then cuda first, each dlopen
-    spraying "libcudart.so.* : cannot open shared object file" provider-load
-    errors before landing on CPU -- and a half-broken GPU stack can crash the
-    process mid-attempt (e.g. cuDNN dispatch aborting) before CPU is ever
-    reached. Result is cached (device topology is fixed for the process).
+    Used ONLY to prune the ORT GPU candidates from the ``auto`` chain on genuine
+    CPU-only hosts (no device nodes at all), so they reach the CPU EP without ORT
+    spraying "libcudart.so.*: cannot open" provider-load errors first. Whenever a
+    GPU is present we keep the GPU candidates and let the ORT EPs (which have
+    their own CPU fallback + the silent-fallback guard) make the real decision --
+    so an old-driver box (e.g. coyote/470) still *tries* GPU then falls back,
+    exactly as before this fallback existed. Result is cached.
 
-    Non-Linux returns True (macOS MLX / Windows DirectML paths handle their own
-    device probing); forced GPU backends bypass this entirely so an explicit
-    user choice still surfaces the specific EP error.
+    Non-Linux returns True (macOS MLX / Windows DirectML handle their own device
+    probing); forced GPU backends bypass this entirely.
     """
     global _cuda_device_probe
     if _cuda_device_probe is not None:
@@ -502,44 +503,24 @@ def _cuda_device_available(verbose: bool = False) -> bool:
         _cuda_device_probe = True
         return True
 
-    result = False
+    present = False
     try:
-        import ctypes
         import glob
-        # Only libcudart is needed to count devices — don't preload the whole
-        # GPU stack here (that happens in DAQOnnxModel once a GPU backend is
-        # actually chosen). Look on the loader path first, then the pip dirs.
-        candidates = ["libcudart.so.12", "libcudart.so"]
-        for p in _get_cuda_library_paths():
-            candidates += sorted(glob.glob(os.path.join(p, "libcudart.so*")),
-                                 key=len, reverse=True)
-        libcudart = None
-        for name in candidates:
-            try:
-                libcudart = ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)
-                break
-            except OSError:
-                continue
-        if libcudart is not None:
-            count = ctypes.c_int(0)
-            # cudaGetDeviceCount needs the NVIDIA driver, not just the runtime
-            # libs. rc==0 (cudaSuccess) with count>0 means a device is usable;
-            # any error (no driver, driver too old for this CUDA major) -> 0.
-            try:
-                rc = libcudart.cudaGetDeviceCount(ctypes.byref(count))
-                result = (rc == 0 and count.value > 0)
-            except Exception:
-                result = False
-        if verbose:
-            print(f"DAQ: CUDA device probe -> "
-                  f"{'usable' if result else 'no usable GPU (CPU only)'}")
-    except Exception as exc:
-        if verbose:
-            print(f"DAQ: CUDA device probe failed ({exc!r}); assuming CPU only")
-        result = False
+        if glob.glob('/dev/nvidia[0-9]*'):
+            present = True
+        elif (os.path.isdir('/proc/driver/nvidia/gpus')
+              and os.listdir('/proc/driver/nvidia/gpus')):
+            present = True
+    except Exception:
+        # Any uncertainty -> don't prune (preserve GPU behavior); the ORT EPs
+        # fall back to CPU on their own if the GPU turns out unusable.
+        present = True
 
-    _cuda_device_probe = result
-    return result
+    if verbose:
+        print("DAQ: NVIDIA GPU device nodes -> "
+              + ("present" if present else "none (CPU only)"))
+    _cuda_device_probe = present
+    return present
 
 
 def download_model(dest_path: Path, url: str = MODEL_URL) -> bool:
