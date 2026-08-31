@@ -325,6 +325,7 @@ def _compute_residue_scores(session, model, npy_path, k, metric, atom_name="CA",
         if log_timing:
             mark("score: residue coordinates", t0)
     valid_ca = np.isfinite(q[:, 0])
+    invalid_metric_residues = None
 
     if metric == "aa_score":
         if log_timing:
@@ -378,8 +379,16 @@ def _compute_residue_scores(session, model, npy_path, k, metric, atom_name="CA",
             t0 = time.perf_counter()
         j = ATOM_TYPES6.index(atom_name)
         scal = np.full((len(residues),), np.nan, dtype=np.float32)
-        if np.any(valid_ca):
-            scal[valid_ca] = atom_mean[valid_ca, j]
+        nucleic = np.fromiter(
+            (r.polymer_type == r.PT_NUCLEIC for r in residues),
+            dtype=bool,
+            count=len(residues),
+        )
+        valid_atom = valid_ca & ~nucleic
+        if np.any(valid_atom):
+            scal[valid_atom] = atom_mean[valid_atom, j]
+        has_nbr = has_nbr & ~nucleic
+        invalid_metric_residues = nucleic
         if log_timing:
             mark("score: metric atom_score", t0)
     elif metric == "ss_score":
@@ -430,6 +439,8 @@ def _compute_residue_scores(session, model, npy_path, k, metric, atom_name="CA",
         mark("score: raw summary", t0)
         t0 = time.perf_counter()
     scal = _window_average_scal(residues, scal, half_window=halfwindow)
+    if invalid_metric_residues is not None:
+        scal[invalid_metric_residues] = np.nan
     if log_timing:
         mark("score: window average", t0)
         timings.append(("score: total", time.perf_counter() - compute_t0))

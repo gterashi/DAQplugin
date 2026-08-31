@@ -96,9 +96,14 @@ def _load_cmd_module():
 
 
 class _Residue:
-    def __init__(self, chain_id, number):
+    PT_NONE = 0
+    PT_AMINO = 1
+    PT_NUCLEIC = 2
+
+    def __init__(self, chain_id, number, polymer_type=PT_AMINO):
         self.chain_id = chain_id
         self.number = number
+        self.polymer_type = polymer_type
 
 
 def _naive_window_average(residues, scal, half_window):
@@ -167,6 +172,88 @@ class WindowAverageTest(unittest.TestCase):
         self.cmd._window_average_scal(residues_a, [1, 2, 3], 1)
         self.cmd._window_average_scal(residues_b, [1, 2, 3], 1)
         self.assertEqual(len(self.cmd._WINDOW_AVERAGE_CACHE), 1)
+
+
+class AtomScorePolymerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.cmd = _load_cmd_module()
+
+    def test_nucleic_residue_is_invalid_for_atom_score(self):
+        residues = [
+            _Residue("A", 1, _Residue.PT_AMINO),
+            _Residue("B", 1, _Residue.PT_NUCLEIC),
+        ]
+        points = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=np.float32)
+        atom = np.zeros((2, 6), dtype=np.float32)
+        atom[:, 2] = [0.75, 0.90]
+
+        original_loader = self.cmd._get_cached_npy_data
+        self.cmd._get_cached_npy_data = lambda _path: (
+            0.0,
+            {
+                "pts": points,
+                "aa": np.zeros((2, 20), dtype=np.float32),
+                "atom": atom,
+                "ss3": np.zeros((2, 3), dtype=np.float32),
+                "tree": None,
+            },
+        )
+        try:
+            result = self.cmd._compute_residue_scores(
+                session=object(),
+                model=types.SimpleNamespace(residues=residues),
+                npy_path="unused.npy",
+                k=1,
+                metric="atom_score",
+                q=points,
+                radius=3.0,
+                halfwindow=0,
+            )
+        finally:
+            self.cmd._get_cached_npy_data = original_loader
+
+        self.assertAlmostEqual(float(result["scores"][0]), 0.75)
+        self.assertTrue(np.isnan(result["scores"][1]))
+        np.testing.assert_array_equal(result["has_neighbor"], [True, False])
+        self.assertEqual(result["raw_count"], 1)
+
+    def test_window_average_does_not_restore_nucleic_atom_score(self):
+        residues = [
+            _Residue("A", 1, _Residue.PT_AMINO),
+            _Residue("A", 2, _Residue.PT_NUCLEIC),
+        ]
+        points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32)
+        atom = np.zeros((2, 6), dtype=np.float32)
+        atom[:, 2] = [0.75, 0.90]
+
+        original_loader = self.cmd._get_cached_npy_data
+        self.cmd._get_cached_npy_data = lambda _path: (
+            0.0,
+            {
+                "pts": points,
+                "aa": np.zeros((2, 20), dtype=np.float32),
+                "atom": atom,
+                "ss3": np.zeros((2, 3), dtype=np.float32),
+                "tree": None,
+            },
+        )
+        try:
+            result = self.cmd._compute_residue_scores(
+                session=object(),
+                model=types.SimpleNamespace(residues=residues),
+                npy_path="unused.npy",
+                k=1,
+                metric="atom_score",
+                q=points,
+                radius=3.0,
+                halfwindow=9,
+            )
+        finally:
+            self.cmd._get_cached_npy_data = original_loader
+
+        self.assertAlmostEqual(float(result["scores"][0]), 0.75)
+        self.assertTrue(np.isnan(result["scores"][1]))
 
 
 if __name__ == "__main__":
